@@ -423,8 +423,15 @@ function propertyCategoryCard(category: RepairCategory) {
   }
   return `<article class="property-card">
     <h3>${mapping.label}</h3>
-    ${checks
-      .map((check) => {
+    ${groupChecksByObject(checks)
+      .map(
+        (group) => `<section class="property-object">
+          <div class="object-label">
+            <strong>#${group.expressId} ${escapeHtml(group.longName || "No LongName")}</strong>
+            <small>GlobalId ${escapeHtml(group.globalId || "Unknown")}</small>
+          </div>
+          ${group.checks
+            .map((check) => {
         const missing = check.status !== "Passed" && check.status !== "Advisory";
         const valueText = missing ? missingValueText(check) : `Current value: ${escapeHtml(check.currentValue)}`;
         return `<div class="property-item ${missing ? "missing" : "passed"}">
@@ -434,7 +441,25 @@ function propertyCategoryCard(category: RepairCategory) {
         </div>`;
       })
       .join("")}
+        </section>`
+      )
+      .join("")}
   </article>`;
+}
+
+function groupChecksByObject(checks: PropertyCheckResult[]) {
+  const groups = new Map<number, { expressId: number; globalId: string; longName: string; checks: PropertyCheckResult[] }>();
+  for (const check of checks) {
+    const group = groups.get(check.expressId) ?? {
+      expressId: check.expressId,
+      globalId: check.globalId,
+      longName: check.longName,
+      checks: []
+    };
+    group.checks.push(check);
+    groups.set(check.expressId, group);
+  }
+  return [...groups.values()];
 }
 
 function missingValueText(check: PropertyCheckResult) {

@@ -58,6 +58,9 @@ export interface RequiredProperty {
 }
 
 export interface PropertyCheckResult extends RequiredProperty {
+  expressId: number;
+  globalId: string;
+  longName: string;
   currentType: string;
   currentValue: string;
   status:

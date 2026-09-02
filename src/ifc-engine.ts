@@ -88,8 +88,9 @@ export function checkRequiredProperties(text: string, selections: RepairSelectio
   const model = parseStep(text);
   return selections.flatMap((selection) => {
     if (selection.category === "siteCoverage") return [];
+    const objectInfo = objectIdentity(selection.expressId, model);
     return REQUIRED_PROPERTIES.filter((required) => required.category === selection.category).flatMap((required) =>
-      checkProperty(model, selection.expressId, required)
+      checkProperty(model, selection.expressId, required).map((check) => ({ ...check, ...objectInfo }))
     );
   });
 }
@@ -368,8 +369,8 @@ function findAreaValue(model: ReturnType<typeof parseStep>, objectId: number): s
 function checkProperty(
   model: ReturnType<typeof parseStep>,
   objectId: number,
-  required: Omit<PropertyCheckResult, "currentType" | "currentValue" | "status" | "explanation">
-): PropertyCheckResult[] {
+  required: Omit<PropertyCheckResult, "expressId" | "globalId" | "longName" | "currentType" | "currentValue" | "status" | "explanation">
+): Array<Omit<PropertyCheckResult, "expressId" | "globalId" | "longName">> {
   const psets = propertySetsForObject(model, objectId);
   const exactPset = psets.find((pset) => pset.name === required.propertySet);
   const ciPset = psets.find((pset) => pset.name.toLowerCase() === required.propertySet.toLowerCase());
@@ -432,13 +433,22 @@ function typeMatches(expected: string, actual: string): boolean {
 }
 
 function result(
-  required: Omit<PropertyCheckResult, "currentType" | "currentValue" | "status" | "explanation">,
+  required: Omit<PropertyCheckResult, "expressId" | "globalId" | "longName" | "currentType" | "currentValue" | "status" | "explanation">,
   currentType: string,
   currentValue: string,
   status: PropertyCheckResult["status"],
   explanation: string
-): PropertyCheckResult {
+): Omit<PropertyCheckResult, "expressId" | "globalId" | "longName"> {
   return { ...required, currentType: currentType || "None", currentValue: currentValue || "Empty", status, explanation };
+}
+
+function objectIdentity(objectId: number, model: ReturnType<typeof parseStep>) {
+  const record = model.records.get(objectId);
+  return {
+    expressId: objectId,
+    globalId: record ? unquoteStep(record.args[0] ?? "") : "",
+    longName: record ? unquoteStep(record.args[7] ?? "") : ""
+  };
 }
 
 function findDanglingReferences(model: ReturnType<typeof parseStep>): string[] {
