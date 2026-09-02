@@ -125,6 +125,9 @@ function renderMatchCard(category: RepairCategory) {
   const skipped = state.skipped.includes(category);
   const spaces = match?.matches ?? [];
   const selectedIds = state.selected[category] ?? [];
+  const selectedSpaces = selectedIds
+    .map((id) => state.inspection?.spaces.find((space) => space.expressId === id))
+    .filter((space): space is NonNullable<typeof space> => Boolean(space));
   return `
     <article class="match-card">
       <div class="match-title">
@@ -136,10 +139,27 @@ function renderMatchCard(category: RepairCategory) {
         <button class="icon-text" data-action="search" data-category="${category}">${SearchIcon()} Search Again</button>
         <button class="ghost" data-action="${skipped ? "unskip" : "skip"}" data-category="${category}">${skipped ? "Restore" : "Skip"}</button>
       </div>
-      <p class="muted">Match count: ${spaces.length}. Same IfcSpace cannot be assigned twice.</p>
+      <p class="muted">Match count: ${spaces.length}. Selected: ${selectedSpaces.length}. Same IfcSpace cannot be assigned twice.</p>
+      ${renderSelectedSpaces(category, selectedSpaces)}
       ${renderMatchSelection(category, spaces, match, selectedIds)}
       ${availableLongNames(category)}
     </article>`;
+}
+
+function renderSelectedSpaces(category: RepairCategory, spaces: IfcInspection["spaces"]) {
+  if (spaces.length === 0) return "";
+  return `<div class="selected-list">
+    <strong>Selected objects</strong>
+    ${spaces.map((space) => renderSelectedPill(category, space)).join("")}
+  </div>`;
+}
+
+function renderSelectedPill(category: RepairCategory, space: IfcInspection["spaces"][number]) {
+  return `<div class="selected-pill">
+    <span><strong>#${space.expressId}</strong> ${escapeHtml(space.longName || "No LongName")}</span>
+    <small>GlobalId ${escapeHtml(space.globalId)} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
+    <button class="ghost small-button" data-remove-selected="${category}" data-id="${space.expressId}" aria-label="Remove #${space.expressId}">Remove</button>
+  </div>`;
 }
 
 function renderMatchSelection(category: RepairCategory, spaces: MatchResult["matches"], match: MatchResult | undefined, selectedIds: number[]) {
@@ -205,7 +225,9 @@ function renderReview() {
             .map((selection) => {
               const space = state.inspection!.spaces.find((item) => item.expressId === selection.expressId)!;
               const mapping = CONVERSION_MAPPINGS[selection.category];
-              const warningCount = state.propertyChecks.filter((check) => check.category === selection.category && check.status !== "Passed" && check.status !== "Advisory").length;
+              const warningCount = state.propertyChecks.filter(
+                (check) => check.category === selection.category && check.expressId === selection.expressId && check.status !== "Passed" && check.status !== "Advisory"
+              ).length;
               return `<tr><td>${mapping.label}</td><td>${escapeHtml(space.longName)}</td><td>${escapeHtml(space.globalId)}</td><td>IfcSpace</td><td>${mapping.entityLabel}</td><td>${space.predefinedType || "Empty"} -> ${mapping.predefinedType}</td><td>${escapeHtml(space.objectType || "Empty")} -> ${mapping.objectType}</td><td>${warningCount}</td></tr>`;
             })
             .join("")}</tbody>
@@ -290,7 +312,6 @@ function bindEvents() {
     input.addEventListener("input", () => {
       const category = input.dataset.search as RepairCategory;
       state.searches[category] = input.value;
-      state.selected[category] = [];
       updateLongNameList(category);
     })
   );
@@ -298,17 +319,26 @@ function bindEvents() {
     input.addEventListener("change", async () => {
       const category = input.dataset.select as RepairCategory;
       const checked = [...document.querySelectorAll<HTMLInputElement>(`[data-select="${category}"]:checked`)].map((item) => Number(item.value));
-      state.selected[category] = checked;
+      const visibleIds = currentMatchIds(category);
+      const retainedIds = (state.selected[category] ?? []).filter((id) => !visibleIds.includes(id));
+      state.selected[category] = uniqueIds([...retainedIds, ...checked]);
       await runMatch();
     })
   );
   document.querySelector<HTMLInputElement>("#acceptWarnings")?.addEventListener("change", (event) => setState({ warningsAccepted: (event.target as HTMLInputElement).checked }));
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => button.addEventListener("click", () => handleAction(button.dataset.action!, button.dataset.category as RepairCategory)));
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-selected]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      const category = button.dataset.removeSelected as RepairCategory;
+      const id = Number(button.dataset.id);
+      state.selected[category] = (state.selected[category] ?? []).filter((selectedId) => selectedId !== id);
+      await runMatch();
+    })
+  );
   document.querySelectorAll<HTMLButtonElement>("[data-pick-longname]").forEach((button) =>
     button.addEventListener("click", async () => {
       const category = button.dataset.pickLongname as RepairCategory;
       state.searches[category] = button.dataset.value ?? "";
-      state.selected[category] = [];
       await runMatch();
     })
   );
@@ -343,7 +373,7 @@ async function runMatch() {
   const matches = worker ? await worker.match(state.inspection.spaces, state.searches, state.skipped, state.selected) : matchSpaces(state.inspection.spaces, state.searches, new Set(state.skipped), state.selected);
   const selected = { ...state.selected };
   for (const match of matches) {
-    selected[match.category] = match.status === "Found" ? match.selectedIds : match.selectedIds.filter((id) => match.matches.some((space) => space.expressId === id));
+    selected[match.category] = uniqueIds(match.selectedIds).filter((id) => state.inspection!.spaces.some((space) => space.expressId === id));
   }
   setState({ selected, matches, status: matches.some((match) => match.status.includes("Multiple") || match.status.includes("Duplicate") || match.status === "Not found") ? "warning" : "waiting", message: "Matching complete. Resolve any missing, multiple, or duplicate assignments." });
 }
@@ -373,6 +403,14 @@ function selectedRepairs(): RepairSelection[] {
     const foundMatch = state.matches.find((match) => match.category === category && match.status === "Found");
     return foundMatch?.matches[0] ? [{ category, expressId: foundMatch.matches[0].expressId }] : [];
   });
+}
+
+function currentMatchIds(category: RepairCategory) {
+  return state.matches.find((match) => match.category === category)?.matches.map((space) => space.expressId) ?? [];
+}
+
+function uniqueIds(ids: number[]) {
+  return [...new Set(ids)];
 }
 
 async function goToProperties() {
@@ -526,7 +564,6 @@ function updateLongNameList(category: RepairCategory) {
     button.addEventListener("click", async () => {
       const pickedCategory = button.dataset.pickLongname as RepairCategory;
       state.searches[pickedCategory] = button.dataset.value ?? "";
-      state.selected[pickedCategory] = [];
       await runMatch();
     })
   );

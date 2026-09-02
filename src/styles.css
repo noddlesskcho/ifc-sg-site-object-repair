@@ -365,6 +365,42 @@ small {
   overflow-wrap: anywhere;
 }
 
+.selected-list {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dbe5e0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f4f8f5;
+}
+
+.selected-pill {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: start;
+  border: 1px solid #cfe0d8;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+
+.selected-pill span,
+.selected-pill small {
+  overflow-wrap: anywhere;
+}
+
+.selected-pill small {
+  grid-column: 1;
+}
+
+.small-button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-height: 32px;
+  padding: 5px 9px;
+}
+
 .space-row small {
   grid-column: 2;
   overflow-wrap: anywhere;
@@ -549,6 +585,16 @@ pre {
   .property-columns,
   .upload {
     grid-template-columns: 1fr;
+  }
+
+  .selected-pill {
+    grid-template-columns: 1fr;
+  }
+
+  .selected-pill small,
+  .small-button {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .topbar,

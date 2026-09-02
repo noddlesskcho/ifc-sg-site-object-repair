@@ -15,9 +15,10 @@ DATA;
 #30= IFCLOCALPLACEMENT($,$);
 #40= IFCSPACE('GID_COVERAGE',#2,'Coverage Name',$,$,#30,#20,'SITE COVERAGE AREA Test',.ELEMENT.,.INTERNAL.,$);
 #41= IFCSPACE('GID_PLANTING',#2,'Planting Name',$,$,#30,#20,'GREEN BUFFER LINE',.ELEMENT.,.INTERNAL.,$);
+#44= IFCSPACE('GID_PLANTING_STRIP',#2,'Planting Strip',$,$,#30,#20,'PLANTING STRIP',.ELEMENT.,.INTERNAL.,$);
 #42= IFCSPACE('GID_BOUNDARY',#2,'Boundary Name',$,$,#30,#20,'SITE BOUNDARY',.ELEMENT.,.INTERNAL.,$);
 #43= IFCSPACE('GID_DUPLICATE',#2,'Duplicate',$,$,#30,#20,'SITE BOUNDARY',.ELEMENT.,.INTERNAL.,$);
-#50= IFCRELAGGREGATES('AGG',$,$,$,#10,(#40,#41,#42,#43));
+#50= IFCRELAGGREGATES('AGG',$,$,$,#10,(#40,#41,#44,#42,#43));
 #60= IFCSPACETYPE('SPACE_TYPE',#2,'Room Text',$,$,$,$,'T',$,.INTERNAL.,$);
 #61= IFCRELDEFINESBYTYPE('TYPE_REL',$,$,$,(#40,#41,#42),#60);
 #70= IFCRELSPACEBOUNDARY('BOUNDARY_A',$,'2ndLevel','2a',#40,$,#20,.VIRTUAL.,.EXTERNAL.);
@@ -45,7 +46,7 @@ describe("file reading and inspection", () => {
     const inspection = inspectIfc(baseIfc, "Sample.ifc", baseIfc.length);
     expect(inspection.schema).toBe("IFC4");
     expect(inspection.exporter).toBe("Vitest Exporter");
-    expect(inspection.spaces).toHaveLength(4);
+    expect(inspection.spaces).toHaveLength(5);
   });
 
   it("flags unsupported schemas", () => {
@@ -84,6 +85,20 @@ describe("matching", () => {
     );
     expect(duplicate[1].status).toBe("Duplicate assignment");
     expect(matchSpaces(spaces, { siteCoverage: "", siteBoundary: "", plantingAreas: "" }, new Set(["plantingAreas"]))[2].status).toBe("Skipped");
+  });
+
+  it("keeps previous selections when another LongName is matched in the same category", () => {
+    const first = matchSpaces(spaces, { siteCoverage: "", siteBoundary: "", plantingAreas: "GREEN BUFFER LINE" });
+    expect(first[2].selectedIds).toEqual([41]);
+
+    const second = matchSpaces(
+      spaces,
+      { siteCoverage: "", siteBoundary: "", plantingAreas: "PLANTING STRIP" },
+      new Set(),
+      { plantingAreas: first[2].selectedIds }
+    );
+    expect(second[2].status).toBe("Found");
+    expect(second[2].selectedIds).toEqual([41, 44]);
   });
 });
 

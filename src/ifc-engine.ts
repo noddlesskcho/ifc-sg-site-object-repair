@@ -74,7 +74,7 @@ export function matchSpaces(
     const value = (searches[category] ?? "").trim();
     let matches = spaces.filter((space) => space.longName === value);
     if (value && matches.length === 0) matches = spaces.filter((space) => space.longName.toLowerCase() === value.toLowerCase());
-    const selectedIds = selected[category] ?? (matches.length === 1 ? [matches[0].expressId] : []);
+    const selectedIds = uniqueIds([...(selected[category] ?? []), ...(matches.length === 1 ? [matches[0].expressId] : [])]);
     const duplicate = selectedIds.find((id) => assigned.has(id));
     selectedIds.forEach((id) => assigned.set(id, category));
     const status =
@@ -82,6 +82,10 @@ export function matchSpaces(
     results.push({ category, searchValue: value, status, matches, selectedIds });
   }
   return results;
+}
+
+function uniqueIds(ids: number[]): number[] {
+  return [...new Set(ids)];
 }
 
 export function checkRequiredProperties(text: string, selections: RepairSelection[]): PropertyCheckResult[] {
