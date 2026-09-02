@@ -291,6 +291,7 @@ function bindEvents() {
       const category = input.dataset.search as RepairCategory;
       state.searches[category] = input.value;
       state.selected[category] = [];
+      updateLongNameList(category);
     })
   );
   document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((input) =>
@@ -460,13 +461,54 @@ function reportSummary(report: RepairResult["report"]) {
 
 function availableLongNames(category: RepairCategory) {
   if (!state.inspection) return "";
-  return `<details class="available" open><summary>Available IfcSpace.LongName values</summary>${state.inspection.spaces
-    .map((space) => `<button class="longname" data-pick-longname="${category}" data-value="${escapeHtml(space.longName)}">#${space.expressId} ${escapeHtml(space.longName || "Empty LongName")}</button>`)
-    .join("")}</details>`;
+  const spaces = filteredLongNameSpaces(category);
+  return `<details class="available" open>
+    <summary>Available IfcSpace.LongName values <span data-longname-count="${category}">${spaces.length} shown</span></summary>
+    <div class="longname-list" data-longname-list="${category}">${renderLongNameButtons(category, spaces)}</div>
+  </details>`;
 }
 
 function emptySearches(): Record<RepairCategory, string> {
   return { siteCoverage: "", siteBoundary: "", plantingAreas: "" };
+}
+
+function filteredLongNameSpaces(category: RepairCategory) {
+  if (!state.inspection) return [];
+  const filter = state.searches[category].trim();
+  if (!filter) return state.inspection.spaces;
+  const normalFilter = normalizeForFilter(filter);
+  return state.inspection.spaces.filter((space) => {
+    const longName = space.longName || "";
+    return longName.toLowerCase().includes(filter.toLowerCase()) || normalizeForFilter(longName).includes(normalFilter);
+  });
+}
+
+function renderLongNameButtons(category: RepairCategory, spaces: IfcInspection["spaces"]) {
+  if (spaces.length === 0) return `<p class="muted empty-list">No LongName values match this keyword.</p>`;
+  return spaces
+    .map((space) => `<button class="longname" data-pick-longname="${category}" data-value="${escapeHtml(space.longName)}">#${space.expressId} ${escapeHtml(space.longName || "Empty LongName")}</button>`)
+    .join("");
+}
+
+function updateLongNameList(category: RepairCategory) {
+  const list = document.querySelector<HTMLDivElement>(`[data-longname-list="${category}"]`);
+  const count = document.querySelector<HTMLSpanElement>(`[data-longname-count="${category}"]`);
+  if (!list) return;
+  const spaces = filteredLongNameSpaces(category);
+  list.innerHTML = renderLongNameButtons(category, spaces);
+  if (count) count.textContent = `${spaces.length} shown`;
+  list.querySelectorAll<HTMLButtonElement>("[data-pick-longname]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      const pickedCategory = button.dataset.pickLongname as RepairCategory;
+      state.searches[pickedCategory] = button.dataset.value ?? "";
+      state.selected[pickedCategory] = [];
+      await runMatch();
+    })
+  );
+}
+
+function normalizeForFilter(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function progressBar(value: number) {
