@@ -78,9 +78,12 @@ function renderSelect() {
     <section class="panel">
       <div class="upload ${loaded ? "compact" : ""}">
         ${FileUpIcon()}
-        <label for="file">${loaded ? "Replace IFC file" : "Choose IFC file"}</label>
-        <input id="file" type="file" accept=".ifc" />
-        <p>${loaded ? `Loaded: ${escapeHtml(state.inspection!.filename)}` : "Your IFC file is processed locally in your browser. It is not uploaded or stored online."}</p>
+        <div>
+          <strong>${loaded ? "IFC file loaded" : "Choose IFC file"}</strong>
+          <p>${loaded ? `${escapeHtml(state.inspection!.filename)} is ready for matching.` : "Your IFC file is processed locally in your browser. It is not uploaded or stored online."}</p>
+        </div>
+        <label class="file-button" for="file">${loaded ? "Change file" : "Choose IFC file"}</label>
+        <input id="file" class="hidden-file" type="file" accept=".ifc" />
         ${warning}
       </div>
       ${state.inspection ? inspectionSummary(state.inspection) : ""}
@@ -109,6 +112,7 @@ function renderMatchCard(category: RepairCategory) {
   const match = state.matches.find((item) => item.category === category);
   const skipped = state.skipped.includes(category);
   const spaces = match?.matches ?? [];
+  const selectedIds = state.selected[category] ?? [];
   return `
     <article class="match-card">
       <div class="match-title">
@@ -121,17 +125,31 @@ function renderMatchCard(category: RepairCategory) {
         <button class="ghost" data-action="${skipped ? "unskip" : "skip"}" data-category="${category}">${skipped ? "Restore" : "Skip"}</button>
       </div>
       <p class="muted">Match count: ${spaces.length}. Same IfcSpace cannot be assigned twice.</p>
-      ${spaces.map((space) => renderSpaceChoice(category, space, match)).join("")}
+      ${renderMatchSelection(category, spaces, match, selectedIds)}
       ${availableLongNames(category)}
     </article>`;
 }
 
-function renderSpaceChoice(category: RepairCategory, space: { expressId: number; globalId: string; name: string; longName: string; storeyName?: string; area?: string }, match?: MatchResult) {
-  const checked = match?.selectedIds.includes(space.expressId) ? "checked" : "";
-  const type = (match?.matches.length ?? 0) > 1 ? "checkbox" : "radio";
+function renderMatchSelection(category: RepairCategory, spaces: MatchResult["matches"], match: MatchResult | undefined, selectedIds: number[]) {
+  if (!match || match.status === "Not found" || match.status === "Skipped") return "";
+  if (match.status === "Found") {
+    const space = spaces[0];
+    return `<div class="selected-space">
+      <strong>Auto-selected #${space.expressId}</strong>
+      <span>${escapeHtml(space.longName || "No LongName")}</span>
+      <small>GlobalId ${escapeHtml(space.globalId)} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
+    </div>`;
+  }
+  return `<p class="warning">Multiple objects use this LongName. Select the intended object or objects.</p>${spaces
+    .map((space) => renderSpaceChoice(category, space, selectedIds))
+    .join("")}`;
+}
+
+function renderSpaceChoice(category: RepairCategory, space: { expressId: number; globalId: string; name: string; longName: string; storeyName?: string; area?: string }, selectedIds: number[]) {
+  const checked = selectedIds.includes(space.expressId) ? "checked" : "";
   return `
     <label class="space-row">
-      <input type="${type}" name="${category}" data-select="${category}" value="${space.expressId}" ${checked} />
+      <input type="checkbox" name="${category}" data-select="${category}" value="${space.expressId}" ${checked} />
       <span><strong>#${space.expressId}</strong> ${escapeHtml(space.longName || "No LongName")}</span>
       <small>GlobalId ${escapeHtml(space.globalId)} | Name ${escapeHtml(space.name || "Empty")} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
     </label>`;
@@ -145,7 +163,7 @@ function renderProperties() {
         <h2>IFC+SG Property Required Information</h2>
         <p>This check warns only. It does not create, populate, or change property values.</p>
       </div>
-      <div class="table-wrap">${propertyTable(state.propertyChecks)}</div>
+      <div class="property-columns">${CATEGORY_ORDER.map((category) => propertyCategoryCard(category)).join("")}</div>
       ${
         warnings.length
           ? `<div class="confirm">
@@ -333,10 +351,42 @@ function inspectionSummary(inspection: IfcInspection) {
   <div class="actions"><button data-action="start-match" ${inspection.schema.toUpperCase() !== "IFC4" ? "disabled" : ""}>Start Matching</button></div>`;
 }
 
-function propertyTable(checks: PropertyCheckResult[]) {
-  return `<table><thead><tr><th>Category</th><th>Property set</th><th>Property</th><th>Expected type</th><th>Current type</th><th>Current value</th><th>Status</th><th>Explanation</th></tr></thead><tbody>${checks
-    .map((check) => `<tr><td>${CONVERSION_MAPPINGS[check.category].label}</td><td>${check.propertySet}</td><td>${check.property}</td><td>${check.expectedType}</td><td>${check.currentType}</td><td>${escapeHtml(check.currentValue)}</td><td><span class="badge">${check.status}</span></td><td>${check.explanation}</td></tr>`)
-    .join("")}</tbody></table>`;
+function propertyCategoryCard(category: RepairCategory) {
+  const mapping = CONVERSION_MAPPINGS[category];
+  const checks = state.propertyChecks.filter((check) => check.category === category);
+  if (category === "siteCoverage") {
+    return `<article class="property-card">
+      <h3>${mapping.label}</h3>
+      <div class="property-item passed">
+        <strong>Entity mapping</strong>
+        <span>IfcSpace -> ${mapping.entityLabel}</span>
+        <small>PredefinedType: USERDEFINED | ObjectType: ${mapping.objectType}</small>
+      </div>
+      <p class="muted">No additional IFC+SG property values are checked for Site Coverage.</p>
+    </article>`;
+  }
+  return `<article class="property-card">
+    <h3>${mapping.label}</h3>
+    ${checks
+      .map((check) => {
+        const missing = check.status !== "Passed" && check.status !== "Advisory";
+        const valueText = missing ? missingValueText(check) : `Current value: ${escapeHtml(check.currentValue)}`;
+        return `<div class="property-item ${missing ? "missing" : "passed"}">
+          <div class="property-line"><strong>${check.property}</strong><span class="badge">${check.status}</span></div>
+          <span>${valueText}</span>
+          <small>${check.propertySet} | ${check.expectedType} | Current type: ${check.currentType}</small>
+        </div>`;
+      })
+      .join("")}
+  </article>`;
+}
+
+function missingValueText(check: PropertyCheckResult) {
+  if (check.status === "Missing property set") return `Missing value: property set ${check.propertySet} not found`;
+  if (check.status === "Missing property") return `Missing value: ${check.property} not found`;
+  if (check.status === "No value") return "Missing value: empty or unknown";
+  if (check.status === "Wrong data type") return `Value needs review: ${escapeHtml(check.currentValue)} has type ${check.currentType}`;
+  return `Value needs review: ${escapeHtml(check.currentValue)}`;
 }
 
 function reportSummary(report: RepairResult["report"]) {
