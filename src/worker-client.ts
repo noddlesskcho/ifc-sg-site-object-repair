@@ -31,6 +31,10 @@ export class IfcWorkerClient {
     );
   }
 
+  inspectBuffer(bytes: ArrayBuffer, filename: string, fileSize: number) {
+    return this.call<{ inspection: IfcInspection; text: string }>({ type: "inspect", payload: { bytes, filename, fileSize } });
+  }
+
   match(spaces: SpaceInfo[], searches: Record<RepairCategory, string>, skipped: RepairCategory[], selected: Partial<Record<RepairCategory, number[]>>) {
     return this.call<MatchResult[]>({ type: "match", payload: { spaces, searches, skipped, selected } });
   }

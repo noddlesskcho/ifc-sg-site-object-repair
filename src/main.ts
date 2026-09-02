@@ -11,6 +11,8 @@ interface AppState {
   status: StatusKind;
   message: string;
   file?: File;
+  loadingFileName: string;
+  loadingProgress: number;
   sourceText: string;
   inspection?: IfcInspection;
   searches: Record<RepairCategory, string>;
@@ -26,6 +28,8 @@ let state: AppState = {
   stage: 0,
   status: "waiting",
   message: "Select an IFC4 STEP file to begin.",
+  loadingFileName: "",
+  loadingProgress: 0,
   sourceText: "",
   searches: { siteCoverage: "", siteBoundary: "", plantingAreas: "" },
   skipped: [],
@@ -74,13 +78,21 @@ function renderStage() {
 function renderSelect() {
   const warning = state.file && state.file.size > 100 * 1024 * 1024 ? `<p class="warning">This file is larger than 100 MB. You can continue, but processing may take longer.</p>` : "";
   const loaded = Boolean(state.inspection);
+  const loading = state.status === "reading" || (state.status === "processing" && state.loadingProgress > 0);
   return `
     <section class="panel">
-      <div class="upload ${loaded ? "compact" : ""}">
+      <div class="upload ${loaded ? "compact" : ""} ${loading ? "loading" : ""}">
         ${FileUpIcon()}
         <div>
-          <strong>${loaded ? "IFC file loaded" : "Choose IFC file"}</strong>
-          <p>${loaded ? `${escapeHtml(state.inspection!.filename)} is ready for matching.` : "Your IFC file is processed locally in your browser. It is not uploaded or stored online."}</p>
+          <strong>${loading ? "Loading IFC file" : loaded ? "IFC file loaded" : "Choose IFC file"}</strong>
+          <p>${
+            loading
+              ? `${escapeHtml(state.loadingFileName)} is being read and inspected.`
+              : loaded
+                ? `${escapeHtml(state.inspection!.filename)} is ready for matching.`
+                : "Your IFC file is processed locally in your browser. It is not uploaded or stored online."
+          }</p>
+          ${loading ? progressBar(state.loadingProgress) : ""}
         </div>
         <label class="file-button" for="file">${loaded ? "Change file" : "Choose IFC file"}</label>
         <input id="file" class="hidden-file" type="file" accept=".ifc" />
@@ -230,7 +242,12 @@ function bindEvents() {
     setState({
       file,
       status: "reading",
-      message: "Reading IFC and opening it with web-ifc...",
+      message: `Reading ${file.name}...`,
+      loadingFileName: file.name,
+      loadingProgress: 5,
+      sourceText: "",
+      inspection: undefined,
+      stage: 0,
       searches: emptySearches(),
       skipped: [],
       selected: {},
@@ -240,16 +257,22 @@ function bindEvents() {
       repair: undefined
     });
     try {
-      const value = worker ? await worker.inspect(file) : { inspection: inspectIfc(await file.text(), file.name, file.size), text: await file.text() };
+      const bytes = await readFileWithProgress(file);
+      setState({ status: "processing", loadingProgress: 75, message: `Opening ${file.name} with web-ifc...` });
+      const value = worker
+        ? await worker.inspectBuffer(bytes, file.name, file.size)
+        : { inspection: inspectIfc(new TextDecoder().decode(bytes), file.name, file.size), text: new TextDecoder().decode(bytes) };
       setState({
         sourceText: value.text,
         inspection: value.inspection,
         stage: 0,
+        loadingFileName: "",
+        loadingProgress: 100,
         status: value.inspection.schema.toUpperCase() === "IFC4" ? "waiting" : "error",
         message: value.inspection.message ?? `Loaded ${value.inspection.spaces.length} IfcSpace objects from ${file.name}.`
       });
     } catch (error) {
-      setState({ status: "error", message: error instanceof Error ? error.message : String(error) });
+      setState({ loadingProgress: 0, loadingFileName: "", inspection: undefined, sourceText: "", status: "error", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -444,6 +467,34 @@ function availableLongNames(category: RepairCategory) {
 
 function emptySearches(): Record<RepairCategory, string> {
   return { siteCoverage: "", siteBoundary: "", plantingAreas: "" };
+}
+
+function progressBar(value: number) {
+  const bounded = Math.max(0, Math.min(100, Math.round(value)));
+  return `<div class="progress" aria-label="IFC loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${bounded}" role="progressbar">
+    <span style="width: ${bounded}%"></span>
+  </div>
+  <small>${bounded}% complete</small>`;
+}
+
+function readFileWithProgress(file: File): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        setState({ loadingProgress: 35 });
+        return;
+      }
+      const readProgress = Math.round((event.loaded / event.total) * 65);
+      setState({ loadingProgress: Math.max(5, readProgress), message: `Reading ${file.name}...` });
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("The selected file could not be read."));
+    reader.onload = () => {
+      setState({ loadingProgress: 70, message: `Finished reading ${file.name}. Inspecting IFC records...` });
+      resolve(reader.result as ArrayBuffer);
+    };
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 function canVisit(index: number) {
