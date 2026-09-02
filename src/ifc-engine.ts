@@ -220,8 +220,18 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
       if (relatedObjects.some((id) => selectedIdSet.has(id)) && propertySet) {
         const psetName = unquoteStep(propertySet.args[2] ?? "");
         if (/^QTO_SPACE/i.test(psetName)) {
-          deleted.add(record.id);
-          removedIncompatibleSets.push(`${psetName} through relationship #${record.id}`);
+          // A Qto_SpaceBaseQuantities relationship can (rarely) relate more than one
+          // IfcSpace to the same quantity set. Only drop the converted objects out of it --
+          // deleting the whole record here would silently discard quantities that still
+          // belong to an unselected, unconverted space.
+          const remaining = relatedObjects.filter((id) => !selectedIdSet.has(id));
+          if (remaining.length === 0) {
+            deleted.add(record.id);
+            removedIncompatibleSets.push(`${psetName} through relationship #${record.id}`);
+          } else {
+            record.args[4] = formatRefList(remaining);
+            removedIncompatibleSets.push(`${psetName} through relationship #${record.id} (retained for unselected objects)`);
+          }
         } else {
           retainedPropertySets.push(psetName);
         }
@@ -270,9 +280,15 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
       objectsRepaired: selections.length,
       repairedCategories,
       skippedCategories,
-      matchedLongNames: Object.fromEntries(
-        selections.map((selection) => [CONVERSION_MAPPINGS[selection.category].label, spaceFromRecord(selection.expressId, sourceModel).longName])
-      ),
+      // Grouped as an array per category (not a single string) -- a category such as
+      // Planting Areas can have more than one selected object, and a plain
+      // Record<string, string> would let the second LongName silently overwrite the first.
+      matchedLongNames: selections.reduce<Record<string, string[]>>((acc, selection) => {
+        const label = CONVERSION_MAPPINGS[selection.category].label;
+        const longName = spaceFromRecord(selection.expressId, sourceModel).longName;
+        (acc[label] ??= []).push(longName);
+        return acc;
+      }, {}),
       entityChanges,
       relationshipChanges,
       removedIncompatibleSets,

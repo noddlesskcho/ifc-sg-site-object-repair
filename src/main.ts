@@ -165,7 +165,7 @@ function renderMatch() {
       </div>
       <div class="actions">
         <button class="ghost" data-action="back">${BackIcon()} Back to review</button>
-        <button data-action="to-properties" ${selectedRepairs().length === 0 ? "disabled" : ""}>Check IFC+SG Information</button>
+        <button data-action="to-properties" ${selectedRepairs().length === 0 || hasUnresolvedDuplicateAssignment() ? "disabled" : ""}>Check IFC+SG Information</button>
       </div>
     </section>`;
 }
@@ -578,7 +578,20 @@ function uniqueIds(ids: number[]) {
   return [...new Set(ids)];
 }
 
+// A "Duplicate assignment" match means the same IfcSpace is still selected under two
+// categories at once. matchSpaces() flags this but deliberately leaves the id assigned to
+// both categories so the user can see and resolve it -- it must not be allowed to reach
+// repairIfc that way, since repairIfc converts each selection's record in place, and the
+// second category to run would silently overwrite the first category's conversion.
+function hasUnresolvedDuplicateAssignment(): boolean {
+  return state.matches.some((match) => !state.skipped.includes(match.category) && match.status === "Duplicate assignment");
+}
+
 async function goToProperties() {
+  if (hasUnresolvedDuplicateAssignment()) {
+    setState({ stage: 1, status: "warning", message: "Resolve the duplicate object assignment before checking IFC+SG information -- the same object cannot be selected under two categories." });
+    return;
+  }
   const selections = selectedRepairs();
   if (selections.length === 0) {
     setState({ stage: 1, status: "warning", message: "Select or match at least one IFC space before checking IFC+SG information." });
@@ -586,7 +599,10 @@ async function goToProperties() {
   }
   setState({ status: "processing", message: "Checking IFC+SG property relationships..." });
   try {
-    const checks = checkRequiredProperties(state.sourceText, selections);
+    // Route through the worker when available, same as match() and repair() -- this
+    // re-parses state.sourceText, which can be 100MB+, and doing that synchronously on
+    // the main thread would freeze the UI for the duration of the parse.
+    const checks = worker ? await worker.properties(state.sourceText, selections) : checkRequiredProperties(state.sourceText, selections);
     setState({
       propertyChecks: checks,
       openPropertyGroups: {},

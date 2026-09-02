@@ -204,4 +204,30 @@ describe("IFC conversion and validation", () => {
     const validation = validateRepairedIfc(repaired, selections, withHashInText);
     expect(validation.blockingErrors.join(" ")).not.toContain("Dangling references");
   });
+
+  it("keeps a Qto_SpaceBaseQuantities relationship for an unselected space when it is shared with a selected one", () => {
+    // #43 ("GID_DUPLICATE") is never in `selections`. Relating it to the same Qto set as
+    // the selected #41 checks that repair only drops the selected object out of the
+    // relationship instead of deleting the whole relationship (which would silently take
+    // #43's quantities with it).
+    const shared = baseIfc.replace(
+      "#88= IFCRELDEFINESBYPROPERTIES('REL_QTO',$,$,$,(#41),#87);",
+      "#88= IFCRELDEFINESBYPROPERTIES('REL_QTO',$,$,$,(#41,#43),#87);"
+    );
+    const repaired = repairIfc(shared, "Sample.ifc", selections, true);
+    expect(repaired.ifcText).toContain("#88= IFCRELDEFINESBYPROPERTIES('REL_QTO',$,$,$,(#43),#87);");
+    expect(repaired.report.removedIncompatibleSets[0]).toContain("retained for unselected objects");
+  });
+
+  it("still removes a Qto_SpaceBaseQuantities relationship entirely when every related space was selected", () => {
+    const repaired = repairIfc(baseIfc, "Sample.ifc", selections, true);
+    expect(repaired.ifcText).not.toContain("REL_QTO");
+    expect(repaired.report.removedIncompatibleSets[0]).not.toContain("retained");
+  });
+
+  it("keeps every matched LongName when a category has more than one selected object", () => {
+    const multiPlanting: RepairSelection[] = [...selections, { category: "plantingAreas", expressId: 44 }];
+    const repaired = repairIfc(baseIfc, "Sample.ifc", multiPlanting, true);
+    expect(repaired.report.matchedLongNames["Planting Areas"]).toEqual(["GREEN BUFFER LINE", "PLANTING STRIP"]);
+  });
 });

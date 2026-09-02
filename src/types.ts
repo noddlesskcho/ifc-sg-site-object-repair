@@ -86,7 +86,7 @@ export interface RepairReport {
   objectsRepaired: number;
   repairedCategories: string[];
   skippedCategories: string[];
-  matchedLongNames: Record<string, string>;
+  matchedLongNames: Record<string, string[]>;
   entityChanges: Array<{
     category: string;
     expressId: number;
