@@ -825,7 +825,7 @@ function canVisit(index: number) {
   if (index === 0) return true;
   if (!state.inspection || state.inspection.schema.toUpperCase() !== "IFC4") return false;
   if (index === 1) return true;
-  if (index === 2) return selectedRepairs().length > 0;
+  if (index === 2) return selectedRepairs().length > 0 && !hasUnresolvedDuplicateAssignment();
   if (index === 3) return state.propertyChecks.length > 0;
   return Boolean(state.repair);
 }

@@ -112,6 +112,19 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
   // repairIfc mutates entity/args on `model` in place, which would otherwise corrupt
   // later reads like LongName/property lookups) and `model` (the one that gets mutated
   // into the repaired output).
+  // The UI blocks a "Duplicate assignment" (the same object selected under two
+  // categories) before it ever calls repairIfc -- see hasUnresolvedDuplicateAssignment()
+  // in main.ts. repairIfc is exported and tested directly, though, and would otherwise
+  // silently mutate the same record twice (each category's conversion overwriting the
+  // last), so it enforces the same rule itself rather than relying on the caller.
+  const seenIds = new Set<number>();
+  for (const selection of selections) {
+    if (seenIds.has(selection.expressId)) {
+      throw new Error(`Object #${selection.expressId} is selected for more than one repair category. Resolve the duplicate assignment before repairing.`);
+    }
+    seenIds.add(selection.expressId);
+  }
+
   const schema = detectSchema(text);
   if (schema.toUpperCase() !== "IFC4") throw new Error("Unsupported schema. Version 1 only repairs IFC4 files.");
   const sourceModel = parseStep(text);

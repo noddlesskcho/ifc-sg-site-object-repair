@@ -230,4 +230,9 @@ describe("IFC conversion and validation", () => {
     const repaired = repairIfc(baseIfc, "Sample.ifc", multiPlanting, true);
     expect(repaired.report.matchedLongNames["Planting Areas"]).toEqual(["GREEN BUFFER LINE", "PLANTING STRIP"]);
   });
+
+  it("rejects a repair call whose selections assign the same object to more than one category, even without going through the UI's own guard", () => {
+    const duplicated: RepairSelection[] = [...selections, { category: "plantingAreas", expressId: 42 }];
+    expect(() => repairIfc(baseIfc, "Sample.ifc", duplicated, true)).toThrow("more than one repair category");
+  });
 });
