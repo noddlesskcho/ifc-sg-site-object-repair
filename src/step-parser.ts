@@ -1,0 +1,164 @@
+export interface StepRecord {
+  id: number;
+  entity: string;
+  args: string[];
+  raw: string;
+}
+
+export interface StepModel {
+  header: string;
+  records: Map<number, StepRecord>;
+  footer: string;
+}
+
+export function splitStepArgs(input: string): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let start = 0;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (char === "'") {
+      if (inString && input[i + 1] === "'") {
+        i += 1;
+      } else {
+        inString = !inString;
+      }
+    } else if (!inString) {
+      if (char === "(") depth += 1;
+      if (char === ")") depth -= 1;
+      if (char === "," && depth === 0) {
+        args.push(input.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+  }
+
+  args.push(input.slice(start).trim());
+  return args;
+}
+
+export function parseStep(text: string): StepModel {
+  const records = new Map<number, StepRecord>();
+  const firstRecord = text.search(/#\d+\s*=/);
+  const header = firstRecord >= 0 ? text.slice(0, firstRecord) : text;
+  let footer = "";
+  let i = firstRecord >= 0 ? firstRecord : text.length;
+
+  while (i < text.length) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (text[i] !== "#") {
+      footer = text.slice(i);
+      break;
+    }
+    const recordStart = i;
+    i += 1;
+    let idText = "";
+    while (/\d/.test(text[i] ?? "")) {
+      idText += text[i];
+      i += 1;
+    }
+    while (/\s/.test(text[i] ?? "")) i += 1;
+    if (text[i] !== "=") throw new Error(`Malformed STEP record #${idText}`);
+    i += 1;
+    while (/\s/.test(text[i] ?? "")) i += 1;
+    let entity = "";
+    while (/[A-Za-z0-9_]/.test(text[i] ?? "")) {
+      entity += text[i].toUpperCase();
+      i += 1;
+    }
+    while (/\s/.test(text[i] ?? "")) i += 1;
+    if (text[i] !== "(") throw new Error(`Malformed STEP arguments for #${idText}`);
+    const argsStart = i + 1;
+    let depth = 1;
+    let inString = false;
+    i += 1;
+    while (i < text.length && depth > 0) {
+      const char = text[i];
+      if (char === "'") {
+        if (inString && text[i + 1] === "'") {
+          i += 1;
+        } else {
+          inString = !inString;
+        }
+      } else if (!inString) {
+        if (char === "(") depth += 1;
+        if (char === ")") depth -= 1;
+      }
+      i += 1;
+    }
+    if (depth !== 0) throw new Error(`Unclosed STEP arguments for #${idText}`);
+    const argsText = text.slice(argsStart, i - 1);
+    while (/\s/.test(text[i] ?? "")) i += 1;
+    if (text[i] !== ";") throw new Error(`Missing semicolon for #${idText}`);
+    i += 1;
+    const raw = text.slice(recordStart, i);
+    records.set(Number(idText), { id: Number(idText), entity, args: splitStepArgs(argsText), raw });
+  }
+
+  return { header, records, footer };
+}
+
+export function serializeRecord(record: StepRecord): string {
+  return `#${record.id}= ${record.entity}(${record.args.join(",")});`;
+}
+
+export function serializeStep(model: StepModel, deleted = new Set<number>()): string {
+  const lines = [...model.records.values()]
+    .sort((a, b) => a.id - b.id)
+    .filter((record) => !deleted.has(record.id))
+    .map(serializeRecord);
+  return `${model.header}${lines.join("\n")}\n${model.footer.trimStart()}`;
+}
+
+export function unquoteStep(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("'") || !trimmed.endsWith("'")) return trimmed === "$" ? "" : trimmed;
+  return trimmed.slice(1, -1).replace(/''/g, "'");
+}
+
+export function quoteStep(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function parseRef(value: string): number | undefined {
+  const match = value.trim().match(/^#(\d+)$/);
+  return match ? Number(match[1]) : undefined;
+}
+
+export function parseRefList(value: string): number[] {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) return [];
+  return splitStepArgs(trimmed.slice(1, -1)).map(parseRef).filter((id): id is number => typeof id === "number");
+}
+
+export function formatRefList(ids: number[]): string {
+  return `(${ids.map((id) => `#${id}`).join(",")})`;
+}
+
+export function parseEnum(value: string): string {
+  const match = value.trim().match(/^\.(.*)\.$/);
+  return match ? match[1] : "";
+}
+
+export function parseTypedValue(value: string): { type: string; value: string; empty: boolean; numeric?: number } {
+  const trimmed = value.trim();
+  if (trimmed === "$") return { type: "$", value: "$", empty: true };
+  const match = trimmed.match(/^([A-Z0-9_]+)\((.*)\)$/i);
+  if (!match) return { type: "", value: trimmed, empty: trimmed.length === 0 };
+  const type = match[1].toUpperCase();
+  const rawValue = match[2].trim();
+  const display = rawValue.startsWith("'") ? unquoteStep(rawValue) : rawValue;
+  const numeric = Number(display.replace(/^\./, "").replace(/\.$/, ""));
+  return { type, value: display, empty: display.trim().length === 0, numeric: Number.isFinite(numeric) ? numeric : undefined };
+}
+
+export function collectReferences(args: string[]): number[] {
+  const refs: number[] = [];
+  for (const arg of args) {
+    const matches = arg.matchAll(/#(\d+)/g);
+    for (const match of matches) refs.push(Number(match[1]));
+  }
+  return refs;
+}
