@@ -3,11 +3,19 @@ import { checkRequiredProperties, inspectIfc, matchSpaces, repairIfc, validateRe
 import type { RepairCategory, RepairSelection } from "./types";
 
 let ifcApi: IfcAPI | undefined;
+// Remembers the last inspected IFC text so "properties"/"repair" calls don't need to
+// re-send the (potentially 100MB+) file text over postMessage every time -- the main
+// thread only sends it explicitly when it differs from what this worker already has.
+let lastInspectedText: string | undefined;
 
 async function getIfcApi() {
   if (!ifcApi) {
     ifcApi = new IfcAPI();
-    ifcApi.SetWasmPath("/wasm/");
+    // import.meta.env.BASE_URL is always an absolute-from-domain-root prefix (see
+    // vite.config.ts) -- "/" locally, or the repo subpath on GitHub Pages -- so this
+    // resolves correctly regardless of where the site is actually served from, unlike a
+    // hardcoded "/wasm/" which would 404 under a Pages project subpath.
+    ifcApi.SetWasmPath(`${import.meta.env.BASE_URL}wasm/`);
     await ifcApi.Init();
   }
   return ifcApi;
@@ -27,6 +35,7 @@ self.onmessage = async (event: MessageEvent) => {
   try {
     if (type === "inspect") {
       const text = new TextDecoder().decode(payload.bytes);
+      lastInspectedText = text;
       const inspection = inspectIfc(text, payload.filename, payload.fileSize);
       if (inspection.schema.toUpperCase() === "IFC4") {
         await reopenWithWebIfc(text);
@@ -43,13 +52,17 @@ self.onmessage = async (event: MessageEvent) => {
     }
 
     if (type === "properties") {
-      postMessage({ id, ok: true, value: checkRequiredProperties(payload.text, payload.selections as RepairSelection[]) });
+      const text = payload.text ?? lastInspectedText;
+      if (text === undefined) throw new Error("No IFC file has been inspected yet.");
+      postMessage({ id, ok: true, value: checkRequiredProperties(text, payload.selections as RepairSelection[]) });
     }
 
     if (type === "repair") {
-      const repaired = repairIfc(payload.text, payload.filename, payload.selections as RepairSelection[], payload.warningsAccepted);
+      const text = payload.text ?? lastInspectedText;
+      if (text === undefined) throw new Error("No IFC file has been inspected yet.");
+      const repaired = repairIfc(text, payload.filename, payload.selections as RepairSelection[], payload.warningsAccepted);
       await reopenWithWebIfc(repaired.ifcText);
-      const webIfcValidation = validateRepairedIfc(repaired.ifcText, payload.selections as RepairSelection[], payload.text);
+      const webIfcValidation = validateRepairedIfc(repaired.ifcText, payload.selections as RepairSelection[], text);
       repaired.report.validation = {
         ...webIfcValidation,
         checks: [...webIfcValidation.checks, "Output reopened successfully with web-ifc/WebAssembly."]

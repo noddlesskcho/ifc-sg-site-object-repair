@@ -1,12 +1,15 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { IfcAPI } from "web-ifc";
 import { inspectIfc, repairIfc } from "../src/ifc-engine";
 import type { RepairSelection } from "../src/types";
 
+// Same real-sample-file caveat as supplied-files.test.ts -- skip gracefully when the
+// Windows-only sample isn't present instead of failing `pnpm test` everywhere else.
 const sourcePath = "C:/Users/ISS/Downloads/wetransfer_s2502_ar_lb-to-3rd-ifc_2026-09-02_0729/Site Boundary Test.ifc";
+const hasSample = existsSync(sourcePath);
 
-describe("web-ifc reopen validation", () => {
+describe.skipIf(!hasSample)("web-ifc reopen validation", () => {
   it("reopens the repaired Archicad sample with web-ifc", async () => {
     const source = readFileSync(sourcePath, "utf8");
     const inspection = inspectIfc(source, "Site Boundary Test.ifc", source.length);

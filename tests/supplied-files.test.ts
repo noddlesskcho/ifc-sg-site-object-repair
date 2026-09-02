@@ -1,12 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { checkRequiredProperties, inspectIfc, repairIfc } from "../src/ifc-engine";
 import type { RepairSelection } from "../src/types";
 
+// These exercise the app against real Archicad/Revit sample exports that only exist on the
+// original developer's machine. They previously hardcoded an absolute Windows path and would
+// fail with ENOENT anywhere else (a fresh checkout, CI, another contributor's machine), which
+// meant `pnpm test` wasn't actually portable. They now skip (not fail) when the files aren't
+// present at those paths, and still run for real when they are.
 const sourcePath = "C:/Users/ISS/Downloads/wetransfer_s2502_ar_lb-to-3rd-ifc_2026-09-02_0729/Site Boundary Test.ifc";
 const referencePath = "C:/Users/ISS/Desktop/fORp&t.ifc";
+const hasSamples = existsSync(sourcePath) && existsSync(referencePath);
 
-describe("supplied IFC files", () => {
+describe.skipIf(!hasSamples)("supplied IFC files", () => {
   it("confirms the Revit reference mappings", () => {
     const reference = readFileSync(referencePath, "utf8");
     expect(reference).toContain("IFCBUILDINGELEMENTPROXY");

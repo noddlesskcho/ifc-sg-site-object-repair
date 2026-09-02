@@ -72,7 +72,7 @@ export function matchSpaces(
       continue;
     }
     const value = (searches[category] ?? "").trim();
-    let matches = spaces.filter((space) => space.longName === value);
+    let matches = value ? spaces.filter((space) => space.longName === value) : [];
     if (value && matches.length === 0) matches = spaces.filter((space) => space.longName.toLowerCase() === value.toLowerCase());
     const selectedIds = uniqueIds([...(selected[category] ?? []), ...(matches.length === 1 ? [matches[0].expressId] : [])]);
     const duplicate = selectedIds.find((id) => assigned.has(id));
@@ -88,8 +88,7 @@ function uniqueIds(ids: number[]): number[] {
   return [...new Set(ids)];
 }
 
-export function checkRequiredProperties(text: string, selections: RepairSelection[]): PropertyCheckResult[] {
-  const model = parseStep(text);
+function checkRequiredPropertiesFromModel(model: StepModelType, selections: RepairSelection[]): PropertyCheckResult[] {
   return selections.flatMap((selection) => {
     if (selection.category === "siteCoverage") return [];
     const objectInfo = objectIdentity(selection.expressId, model);
@@ -99,9 +98,23 @@ export function checkRequiredProperties(text: string, selections: RepairSelectio
   });
 }
 
+export function checkRequiredProperties(text: string, selections: RepairSelection[]): PropertyCheckResult[] {
+  return checkRequiredPropertiesFromModel(parseStep(text), selections);
+}
+
 export function repairIfc(text: string, filename: string, selections: RepairSelection[], warningsAccepted: boolean): RepairResult {
-  const sourceInspection = inspectIfc(text, filename, text.length);
-  if (sourceInspection.schema.toUpperCase() !== "IFC4") throw new Error("Unsupported schema. Version 1 only repairs IFC4 files.");
+  // A single repair used to call parseStep on the same text 5-8+ times (once via
+  // inspectIfc, once here, once inside checkRequiredProperties, twice inside
+  // validateRepairedIfc, and once more per selection for matchedLongNames) -- for a
+  // large IFC file that's most of the operation's cost spent re-tokenizing text it had
+  // already tokenized. Everything below now shares exactly two parses: `sourceModel`
+  // (read-only, used for anything that needs the original pre-repair shape of a record --
+  // repairIfc mutates entity/args on `model` in place, which would otherwise corrupt
+  // later reads like LongName/property lookups) and `model` (the one that gets mutated
+  // into the repaired output).
+  const schema = detectSchema(text);
+  if (schema.toUpperCase() !== "IFC4") throw new Error("Unsupported schema. Version 1 only repairs IFC4 files.");
+  const sourceModel = parseStep(text);
   const model = parseStep(text);
   const deleted = new Set<number>();
   const relationshipChanges: string[] = [];
@@ -117,7 +130,11 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
     const record = model.records.get(selection.expressId);
     if (!record || record.entity !== "IFCSPACE") throw new Error(`Selected object #${selection.expressId} is not an IfcSpace.`);
     const mapping = CONVERSION_MAPPINGS[selection.category];
-    const old = spaceFromRecord(selection.expressId, model);
+    // Read from sourceModel (untouched) rather than `model` -- `model`'s IfcSpace records
+    // get their args replaced below as each selection is converted, and reading the "old"
+    // shape from the model being mutated risks picking up a stale cached storey/pset index
+    // built before other selections' relationship changes landed.
+    const old = spaceFromRecord(selection.expressId, sourceModel);
     const tag = old.name.trim() ? old.name : old.longName;
     record.entity = mapping.entity;
     record.args = [
@@ -234,8 +251,10 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
 
   const ifcText = serializeStep(model, deleted);
   const outputFilename = makeOutputFilename(filename);
-  const propertyWarnings = checkRequiredProperties(text, selections).filter((check) => check.status !== "Passed" && check.status !== "Advisory");
-  const validation = validateRepairedIfc(ifcText, selections, text);
+  const propertyWarnings = checkRequiredPropertiesFromModel(sourceModel, selections).filter(
+    (check) => check.status !== "Passed" && check.status !== "Advisory"
+  );
+  const validation = validateRepairedIfcFromModel(model, deleted, selections, sourceModel);
   const repairedCategories = selections.map((selection) => CONVERSION_MAPPINGS[selection.category].label);
   const skippedCategories = CATEGORY_ORDER.filter((category) => !selections.some((selection) => selection.category === category)).map(
     (category) => CONVERSION_MAPPINGS[category].label
@@ -247,12 +266,12 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
     report: {
       originalFilename: filename,
       outputFilename,
-      detectedSchema: sourceInspection.schema,
+      detectedSchema: schema,
       objectsRepaired: selections.length,
       repairedCategories,
       skippedCategories,
       matchedLongNames: Object.fromEntries(
-        selections.map((selection) => [CONVERSION_MAPPINGS[selection.category].label, spaceFromRecord(selection.expressId, parseStep(text)).longName])
+        selections.map((selection) => [CONVERSION_MAPPINGS[selection.category].label, spaceFromRecord(selection.expressId, sourceModel).longName])
       ),
       entityChanges,
       relationshipChanges,
@@ -265,18 +284,48 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
   };
 }
 
-export function validateRepairedIfc(text: string, selections: RepairSelection[], originalText?: string): ValidationResult {
+function validateRepairedIfcFromModel(
+  model: StepModelType,
+  deleted: Set<number>,
+  selections: RepairSelection[],
+  original?: StepModelType
+): ValidationResult {
   const blockingErrors: string[] = [];
   const warnings: string[] = [];
   const checks: string[] = [];
-  const model = parseStep(text);
-  const original = originalText ? parseStep(originalText) : undefined;
-  if (detectSchema(text).toUpperCase() !== "IFC4") blockingErrors.push("Output schema is not IFC4.");
+  // FILE_SCHEMA always appears in the HEADER section, i.e. before the first numbered
+  // record, so model.header carries the same text detectSchema needs -- no need to
+  // re-scan (or re-parse) the full file text just for this.
+  if (detectSchema(model.header).toUpperCase() !== "IFC4") blockingErrors.push("Output schema is not IFC4.");
+
+  // These three checks used to each do their own O(records) scan PER SELECTION (an
+  // O(records x selections) pass over the whole model). Built once here instead, and
+  // skipping anything flagged `deleted` so this matches exactly what re-parsing the
+  // final serialized (deleted-record-free) output would have found.
+  const spaceBoundaryTargets = new Set<number>();
+  const spaceTypeTargets = new Set<number>();
+  const containmentCounts = new Map<number, number>();
+  for (const record of model.records.values()) {
+    if (deleted.has(record.id)) continue;
+    if (record.entity === "IFCRELSPACEBOUNDARY") {
+      const related = parseRef(record.args[4] ?? "");
+      if (related !== undefined) spaceBoundaryTargets.add(related);
+    } else if (record.entity === "IFCRELDEFINESBYTYPE") {
+      const relatedType = parseRef(record.args[5] ?? "");
+      if (relatedType !== undefined && model.records.get(relatedType)?.entity === "IFCSPACETYPE") {
+        for (const id of parseRefList(record.args[4] ?? "")) spaceTypeTargets.add(id);
+      }
+    } else if (record.entity === "IFCRELCONTAINEDINSPATIALSTRUCTURE") {
+      for (const id of parseRefList(record.args[4] ?? "")) {
+        containmentCounts.set(id, (containmentCounts.get(id) ?? 0) + 1);
+      }
+    }
+  }
 
   for (const selection of selections) {
     const mapping = CONVERSION_MAPPINGS[selection.category];
     const record = model.records.get(selection.expressId);
-    if (!record) {
+    if (!record || deleted.has(selection.expressId)) {
       blockingErrors.push(`Repaired entity #${selection.expressId} does not exist.`);
       continue;
     }
@@ -292,31 +341,20 @@ export function validateRepairedIfc(text: string, selections: RepairSelection[],
       if (oldRecord && oldRecord.args[0] !== record.args[0]) blockingErrors.push(`#${selection.expressId} did not preserve GlobalId.`);
       if (oldRecord && oldRecord.args[6] !== record.args[6]) blockingErrors.push(`#${selection.expressId} did not preserve geometry representation reference.`);
     }
-    const inSpaceBoundary = [...model.records.values()].some(
-      (candidate) => candidate.entity === "IFCRELSPACEBOUNDARY" && parseRef(candidate.args[4]) === selection.expressId
-    );
-    if (inSpaceBoundary) blockingErrors.push(`#${selection.expressId} is still referenced by IfcRelSpaceBoundary.`);
-    const inSpaceType = [...model.records.values()].some((candidate) => {
-      const relatedType = parseRef(candidate.args[5] ?? "");
-      return (
-        candidate.entity === "IFCRELDEFINESBYTYPE" &&
-        parseRefList(candidate.args[4]).includes(selection.expressId) &&
-        relatedType !== undefined &&
-        model.records.get(relatedType)?.entity === "IFCSPACETYPE"
-      );
-    });
-    if (inSpaceType) blockingErrors.push(`#${selection.expressId} is still assigned to IfcSpaceType.`);
-    const containments = [...model.records.values()].filter(
-      (candidate) =>
-        candidate.entity === "IFCRELCONTAINEDINSPATIALSTRUCTURE" && parseRefList(candidate.args[4]).includes(selection.expressId)
-    );
-    if (containments.length === 0) blockingErrors.push(`#${selection.expressId} has no spatial containment.`);
-    if (containments.length > 1) blockingErrors.push(`#${selection.expressId} has duplicate spatial containment.`);
+    if (spaceBoundaryTargets.has(selection.expressId)) blockingErrors.push(`#${selection.expressId} is still referenced by IfcRelSpaceBoundary.`);
+    if (spaceTypeTargets.has(selection.expressId)) blockingErrors.push(`#${selection.expressId} is still assigned to IfcSpaceType.`);
+    const containments = containmentCounts.get(selection.expressId) ?? 0;
+    if (containments === 0) blockingErrors.push(`#${selection.expressId} has no spatial containment.`);
+    if (containments > 1) blockingErrors.push(`#${selection.expressId} has duplicate spatial containment.`);
   }
 
-  const dangling = findDanglingReferences(model);
+  const dangling = findDanglingReferences(model, deleted);
   if (dangling.length > 0) blockingErrors.push(`Dangling references found: ${dangling.slice(0, 8).join(", ")}${dangling.length > 8 ? "..." : ""}.`);
   return { passed: blockingErrors.length === 0, blockingErrors, warnings, checks };
+}
+
+export function validateRepairedIfc(text: string, selections: RepairSelection[], originalText?: string): ValidationResult {
+  return validateRepairedIfcFromModel(parseStep(text), new Set(), selections, originalText ? parseStep(originalText) : undefined);
 }
 
 function spaceFromRecord(id: number, model: ReturnType<typeof parseStep>): SpaceInfo {
@@ -337,27 +375,75 @@ function spaceFromRecord(id: number, model: ReturnType<typeof parseStep>): Space
   };
 }
 
-function findStoreyForObject(model: ReturnType<typeof parseStep>, objectId: number): number | undefined {
+// findStoreyForObject/propertySetsForObject/findAreaValue used to each do their own full
+// O(records) linear scan, called once PER OBJECT (so O(records x objects) overall -- for a
+// file with 100k records and 1k spaces that's ~100M iterations just for storey lookups on
+// load). These are now backed by an index built once per model and cached by model identity,
+// so repeated lookups against the same model are O(1) amortized instead of O(records).
+//
+// NOTE: the cache key is model object identity, not content. These indexes are only ever
+// built from an already-parsed model and read afterwards in this codebase (never rebuilt
+// mid-mutation) -- if a caller ever mutates a model's relationship records in place and then
+// expects a storey/pset lookup to see the new relationships without re-parsing, the cached
+// index would be stale. Re-parse into a fresh model object (or add cache invalidation) if
+// that ever becomes necessary.
+type StepModelType = ReturnType<typeof parseStep>;
+
+const storeyIndexCache = new WeakMap<StepModelType, Map<number, number>>();
+
+function getStoreyIndex(model: StepModelType): Map<number, number> {
+  const cached = storeyIndexCache.get(model);
+  if (cached) return cached;
+  const index = new Map<number, number>();
   for (const record of model.records.values()) {
-    if ((record.entity === "IFCRELAGGREGATES" || record.entity === "IFCRELCONTAINEDINSPATIALSTRUCTURE") && parseRefList(record.args[5] ?? "").includes(objectId)) {
-      return parseRef(record.args[4]);
-    }
-    if (record.entity === "IFCRELCONTAINEDINSPATIALSTRUCTURE" && parseRefList(record.args[4] ?? "").includes(objectId)) {
-      return parseRef(record.args[5]);
-    }
-    if (record.entity === "IFCRELAGGREGATES" && parseRefList(record.args[5] ?? "").includes(objectId)) {
-      return parseRef(record.args[4]);
+    if (record.entity === "IFCRELCONTAINEDINSPATIALSTRUCTURE") {
+      const storey = parseRef(record.args[5] ?? "");
+      if (storey !== undefined) {
+        for (const id of parseRefList(record.args[4] ?? "")) {
+          if (!index.has(id)) index.set(id, storey);
+        }
+      }
+    } else if (record.entity === "IFCRELAGGREGATES") {
+      const parent = parseRef(record.args[4] ?? "");
+      if (parent !== undefined) {
+        for (const id of parseRefList(record.args[5] ?? "")) {
+          if (!index.has(id)) index.set(id, parent);
+        }
+      }
     }
   }
-  return undefined;
+  storeyIndexCache.set(model, index);
+  return index;
 }
 
-function findAreaValue(model: ReturnType<typeof parseStep>, objectId: number): string | undefined {
-  const rels = [...model.records.values()].filter(
-    (record) => record.entity === "IFCRELDEFINESBYPROPERTIES" && parseRefList(record.args[4]).includes(objectId)
-  );
-  for (const rel of rels) {
-    const pset = model.records.get(parseRef(rel.args[5]) ?? -1);
+function findStoreyForObject(model: StepModelType, objectId: number): number | undefined {
+  return getStoreyIndex(model).get(objectId);
+}
+
+const psetLinksCache = new WeakMap<StepModelType, Map<number, number[]>>();
+
+function getPsetLinks(model: StepModelType): Map<number, number[]> {
+  const cached = psetLinksCache.get(model);
+  if (cached) return cached;
+  const index = new Map<number, number[]>();
+  for (const record of model.records.values()) {
+    if (record.entity !== "IFCRELDEFINESBYPROPERTIES") continue;
+    const psetId = parseRef(record.args[5] ?? "");
+    if (psetId === undefined) continue;
+    for (const objectId of parseRefList(record.args[4] ?? "")) {
+      const list = index.get(objectId) ?? [];
+      list.push(psetId);
+      index.set(objectId, list);
+    }
+  }
+  psetLinksCache.set(model, index);
+  return index;
+}
+
+function findAreaValue(model: StepModelType, objectId: number): string | undefined {
+  const psetIds = getPsetLinks(model).get(objectId) ?? [];
+  for (const psetId of psetIds) {
+    const pset = model.records.get(psetId);
     if (!pset) continue;
     const propertyIds = parseRefList(pset.args[4] ?? "");
     for (const propertyId of propertyIds) {
@@ -414,10 +500,10 @@ function checkProperty(
   return rows;
 }
 
-function propertySetsForObject(model: ReturnType<typeof parseStep>, objectId: number) {
-  return [...model.records.values()]
-    .filter((record) => record.entity === "IFCRELDEFINESBYPROPERTIES" && parseRefList(record.args[4]).includes(objectId))
-    .map((rel) => model.records.get(parseRef(rel.args[5]) ?? -1))
+function propertySetsForObject(model: StepModelType, objectId: number) {
+  const psetIds = getPsetLinks(model).get(objectId) ?? [];
+  return psetIds
+    .map((id) => model.records.get(id))
     .filter(Boolean)
     .map((pset) => ({
       id: pset!.id,
@@ -430,7 +516,11 @@ function propertySetsForObject(model: ReturnType<typeof parseStep>, objectId: nu
 }
 
 function typeMatches(expected: string, actual: string): boolean {
-  if (expected.includes("Boolean")) return actual === "IFCBOOLEAN";
+  // IFCLOGICAL(.T.)/(.F.) is a valid true/false value wherever IfcBoolean is expected --
+  // some real-world exports (Archicad in particular) write these properties as IfcLogical
+  // rather than IfcBoolean. Only the unknown state (.U.) is invalid, and that is already
+  // rejected earlier (as "No value") before typeMatches is ever consulted.
+  if (expected.includes("Boolean")) return actual === "IFCBOOLEAN" || actual === "IFCLOGICAL";
   if (expected.includes("AreaMeasure")) return actual === "IFCAREAMEASURE";
   if (expected.includes("Label") || expected.includes("text")) return TEXT_TYPES.has(actual);
   return false;
@@ -455,11 +545,12 @@ function objectIdentity(objectId: number, model: ReturnType<typeof parseStep>) {
   };
 }
 
-function findDanglingReferences(model: ReturnType<typeof parseStep>): string[] {
+function findDanglingReferences(model: StepModelType, deleted: Set<number> = new Set()): string[] {
   const dangling: string[] = [];
   for (const record of model.records.values()) {
+    if (deleted.has(record.id)) continue;
     for (const ref of collectReferences(record.args)) {
-      if (!model.records.has(ref)) dangling.push(`#${record.id} -> #${ref}`);
+      if (!model.records.has(ref) || deleted.has(ref)) dangling.push(`#${record.id} -> #${ref}`);
     }
   }
   return dangling;
@@ -469,8 +560,35 @@ function makeOutputFilename(filename: string): string {
   return filename.replace(/\.ifc$/i, "") + "_IFCSG_Repaired.ifc";
 }
 
+// A real IFC GlobalId is a 22-character base64-style compression of a 128-bit UUID (the
+// well-known algorithm used across IFC tooling: 1 byte -> 2 chars, then five groups of
+// 3 bytes -> 4 chars each = 1 + 15 = 16 bytes -> 2 + 5*4 = 22 chars). Picking 22 random
+// characters from the alphabet independently of each other (the previous implementation)
+// is not a valid compressed UUID, which can trip up strict validators in downstream BIM
+// tools (Solibri, xBIM, re-import into Revit/Archicad) even though it "looks" the right
+// shape. This builds a real (version 4 shaped) UUID from secure random bytes and encodes
+// it with the standard compression so newly created relationships get a properly formed
+// GlobalId.
 function makeIfcGuid(): string {
   const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
-  const bytes = crypto.getRandomValues(new Uint8Array(22));
-  return [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const toBase64 = (value: number, length: number) => {
+    let chars = "";
+    let remaining = value;
+    for (let i = 0; i < length; i += 1) {
+      chars = alphabet[remaining % 64] + chars;
+      remaining = Math.floor(remaining / 64);
+    }
+    return chars;
+  };
+  return (
+    toBase64(bytes[0], 2) +
+    toBase64((bytes[1] << 16) + (bytes[2] << 8) + bytes[3], 4) +
+    toBase64((bytes[4] << 16) + (bytes[5] << 8) + bytes[6], 4) +
+    toBase64((bytes[7] << 16) + (bytes[8] << 8) + bytes[9], 4) +
+    toBase64((bytes[10] << 16) + (bytes[11] << 8) + bytes[12], 4) +
+    toBase64((bytes[13] << 16) + (bytes[14] << 8) + bytes[15], 4)
+  );
 }

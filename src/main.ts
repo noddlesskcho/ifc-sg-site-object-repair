@@ -21,6 +21,7 @@ interface AppState {
   matches: MatchResult[];
   propertyChecks: PropertyCheckResult[];
   warningsAccepted: boolean;
+  openPropertyGroups: Record<string, boolean>;
   repair?: RepairResult;
 }
 
@@ -36,7 +37,8 @@ let state: AppState = {
   selected: {},
   matches: [],
   propertyChecks: [],
-  warningsAccepted: false
+  warningsAccepted: false,
+  openPropertyGroups: {}
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -50,21 +52,70 @@ function render() {
   app.innerHTML = `
     <main class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Local IFC+SG utility</p>
+        <div class="header-graphic">${headerGraphic()}</div>
+        <div class="topbar-text">
+          <p class="eyebrow">IFC+SG Utility</p>
           <h1>Site Object Repair</h1>
+          <p class="subtitle">Repair and validate site objects in an IFC+SG model.</p>
         </div>
-        <div class="status ${state.status}">${statusLabel(state.status)}</div>
+        <div class="status ${state.status}">${iconForStatus(state.status)}<span>${statusLabel(state.status)}</span></div>
       </header>
-      <nav class="steps">${["Select IFC", "Match Objects", "Check IFC+SG Information", "Review Repair", "Repair and Download"]
-        .map((label, index) => `<button class="${index === state.stage ? "active" : ""}" data-stage="${index}" ${canVisit(index) ? "" : "disabled"}>${index + 1}. ${label}</button>`)
-        .join("")}</nav>
-      <section class="notice ${state.status === "error" || state.status === "validation-failed" ? "danger" : state.status === "warning" ? "warn" : ""}">
-        ${iconForStatus(state.status)}<span>${state.message}</span>
-      </section>
+      ${renderStepper()}
+      ${state.stage === 4 ? "" : renderNotice()}
       ${renderStage()}
     </main>`;
   bindEvents();
+}
+
+function renderNotice() {
+  const showProgress = state.status === "processing" && state.loadingProgress > 0 && state.stage !== 0;
+  return `<section class="notice ${showProgress ? "with-progress" : ""} ${state.status === "error" || state.status === "validation-failed" ? "danger" : state.status === "warning" ? "warn" : ""}">
+    ${iconForStatus(state.status)}
+    <div class="notice-body">
+      <span>${state.message}</span>
+      ${showProgress ? progressBar(state.loadingProgress) : ""}
+    </div>
+  </section>`;
+}
+
+function renderStepper() {
+  const labels = ["Upload", "Match", "IFC+SG Check", "Review", "Download"];
+  const items = labels
+    .map((label, index) => {
+      const stepState = index < state.stage ? "completed" : index === state.stage ? "current" : "upcoming";
+      const disabled = canVisit(index) ? "" : "disabled";
+      return `<li class="stepper-item ${stepState}">
+        <button class="stepper-control" data-stage="${index}" ${disabled} aria-current="${index === state.stage ? "step" : "false"}" aria-label="Step ${index + 1} of ${labels.length}: ${label}">
+          <span class="stepper-dot">${stepState === "completed" ? CheckIcon() : index + 1}</span>
+          <span class="stepper-label">${label}</span>
+        </button>
+      </li>`;
+    })
+    .join("");
+  return `
+    <nav class="stepper" aria-label="Workflow progress">
+      <ol class="stepper-list">${items}</ol>
+      <p class="stepper-compact">Step ${state.stage + 1} of ${labels.length} — ${labels[state.stage]}</p>
+    </nav>`;
+}
+
+function headerGraphic() {
+  return `<svg viewBox="0 0 460 200" preserveAspectRatio="xMaxYMid slice" focusable="false" aria-hidden="true">
+    <path d="M50 168 L50 66 L128 26 L206 66 L206 168" />
+    <path d="M50 66 L128 104 L206 66" />
+    <path d="M128 26 L128 104 L128 168" />
+    <path class="accent" d="M206 66 L284 26 L362 66 L362 168 L284 208 L206 168" />
+    <path class="accent" d="M284 26 L284 104 L362 66" />
+    <path d="M362 66 L410 90" />
+    <circle cx="50" cy="66" r="3.5" />
+    <circle cx="128" cy="26" r="3.5" />
+    <circle cx="206" cy="66" r="3.5" />
+    <circle cx="128" cy="104" r="3.5" />
+    <circle cx="284" cy="26" r="3.5" />
+    <circle cx="362" cy="66" r="3.5" />
+    <circle cx="284" cy="104" r="3.5" />
+    <circle cx="410" cy="90" r="3.5" />
+  </svg>`;
 }
 
 function renderStage() {
@@ -113,7 +164,7 @@ function renderMatch() {
         ${CATEGORY_ORDER.map((category) => renderMatchCard(category)).join("")}
       </div>
       <div class="actions">
-        <button class="secondary" data-action="back">Back and Review</button>
+        <button class="ghost" data-action="back">${BackIcon()} Back to review</button>
         <button data-action="to-properties" ${selectedRepairs().length === 0 ? "disabled" : ""}>Check IFC+SG Information</button>
       </div>
     </section>`;
@@ -128,60 +179,73 @@ function renderMatchCard(category: RepairCategory) {
   const selectedSpaces = selectedIds
     .map((id) => state.inspection?.spaces.find((space) => space.expressId === id))
     .filter((space): space is NonNullable<typeof space> => Boolean(space));
+  const badge = matchBadge(match, skipped, selectedSpaces.length, state.searches[category]);
   return `
     <article class="match-card">
       <div class="match-title">
         <h3>${mapping.label}</h3>
-        <span class="badge">${match?.status ?? "Waiting"}</span>
+        <span class="badge ${badge.cls}">${badge.label}</span>
       </div>
       <input data-search="${category}" value="${escapeHtml(state.searches[category])}" placeholder="Archicad Zone Name" ${skipped ? "disabled" : ""} />
       <div class="mini-actions">
-        <button class="icon-text" data-action="search" data-category="${category}">${SearchIcon()} Search Again</button>
+        <button class="icon-text ghost" data-action="search" data-category="${category}">${SearchIcon()} Search Again</button>
         <button class="ghost" data-action="${skipped ? "unskip" : "skip"}" data-category="${category}">${skipped ? "Restore" : "Skip"}</button>
       </div>
-      <p class="muted">Match count: ${spaces.length}. Selected: ${selectedSpaces.length}. Same IfcSpace cannot be assigned twice.</p>
+      <p class="muted">Match count: <strong>${spaces.length}</strong>. Selected: <strong class="${selectedSpaces.length > 0 ? "count-active" : ""}">${selectedSpaces.length}</strong>. Same IfcSpace cannot be assigned twice.</p>
       ${renderSelectedSpaces(category, selectedSpaces)}
       ${renderMatchSelection(category, spaces, match, selectedIds)}
       ${availableLongNames(category)}
     </article>`;
 }
 
+function matchBadge(match: MatchResult | undefined, skipped: boolean, selectedCount: number, searchValue: string) {
+  if (skipped) return { label: "Skipped", cls: "badge-neutral" };
+  if (!searchValue.trim() && selectedCount > 0) {
+    return { label: `${selectedCount} Selected`, cls: "badge-success" };
+  }
+  const status = match?.status ?? "Waiting";
+  return { label: status, cls: matchBadgeClass(match?.status) };
+}
+
+function matchBadgeClass(status?: MatchResult["status"]) {
+  if (status === "Found") return "badge-success";
+  if (status === "Multiple matches") return "badge-warning";
+  if (status === "Not found" || status === "Duplicate assignment") return "badge-danger";
+  if (status === "Skipped") return "badge-neutral";
+  return "";
+}
+
 function renderSelectedSpaces(category: RepairCategory, spaces: IfcInspection["spaces"]) {
   if (spaces.length === 0) return "";
   return `<div class="selected-list">
-    <strong>Selected objects</strong>
+    <strong class="subsection-label">Selected objects</strong>
     ${spaces.map((space) => renderSelectedPill(category, space)).join("")}
   </div>`;
 }
 
 function renderSelectedPill(category: RepairCategory, space: IfcInspection["spaces"][number]) {
   return `<div class="selected-pill">
-    <span><strong>#${space.expressId}</strong> ${escapeHtml(space.longName || "No LongName")}</span>
+    <span><span class="pill-check" aria-hidden="true">${CheckIcon()}</span><strong>#${space.expressId}</strong> ${escapeHtml(space.longName || "No LongName")}</span>
     <small>GlobalId ${escapeHtml(space.globalId)} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
     <button class="ghost small-button" data-remove-selected="${category}" data-id="${space.expressId}" aria-label="Remove #${space.expressId}">Remove</button>
   </div>`;
 }
 
 function renderMatchSelection(category: RepairCategory, spaces: MatchResult["matches"], match: MatchResult | undefined, selectedIds: number[]) {
-  if (!match || match.status === "Not found" || match.status === "Skipped") return "";
-  if (match.status === "Found") {
-    const space = spaces[0];
-    return `<div class="selected-space">
-      <strong>Auto-selected #${space.expressId}</strong>
-      <span>${escapeHtml(space.longName || "No LongName")}</span>
-      <small>GlobalId ${escapeHtml(space.globalId)} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
-    </div>`;
+  if (!match || match.status === "Not found" || match.status === "Skipped" || match.status === "Found") return "";
+  const remaining = spaces.filter((space) => !selectedIds.includes(space.expressId));
+  if (remaining.length === 0) {
+    return `<p class="muted">All objects matching this LongName are already selected above.</p>`;
   }
-  return `<p class="warning">Multiple objects use this LongName. Select the intended object or objects.</p>${spaces
-    .map((space) => renderSpaceChoice(category, space, selectedIds))
+  return `<p class="warning">Multiple objects use this LongName. Select any additional objects to include.</p>${remaining
+    .map((space) => renderSpaceChoice(category, space))
     .join("")}`;
 }
 
-function renderSpaceChoice(category: RepairCategory, space: { expressId: number; globalId: string; name: string; longName: string; storeyName?: string; area?: string }, selectedIds: number[]) {
-  const checked = selectedIds.includes(space.expressId) ? "checked" : "";
+function renderSpaceChoice(category: RepairCategory, space: { expressId: number; globalId: string; name: string; longName: string; storeyName?: string; area?: string }) {
   return `
     <label class="space-row">
-      <input type="checkbox" name="${category}" data-select="${category}" value="${space.expressId}" ${checked} />
+      <input type="checkbox" name="${category}" data-select="${category}" value="${space.expressId}" />
       <span><strong>#${space.expressId}</strong> ${escapeHtml(space.longName || "No LongName")}</span>
       <small>GlobalId ${escapeHtml(space.globalId)} | Name ${escapeHtml(space.name || "Empty")} | Storey ${escapeHtml(space.storeyName || "Unknown")} | Area ${escapeHtml(space.area || "Not found")}</small>
     </label>`;
@@ -205,7 +269,7 @@ function renderProperties() {
           : `<p class="success">All applicable IFC+SG property checks passed.</p>`
       }
       <div class="actions">
-        <button class="secondary" data-action="back">Back and Review</button>
+        <button class="ghost" data-action="back">${BackIcon()} Back to review</button>
         <button data-action="to-review" ${warnings.length && !state.warningsAccepted ? "disabled" : ""}>Continue Repair</button>
       </div>
     </section>`;
@@ -228,13 +292,13 @@ function renderReview() {
               const warningCount = state.propertyChecks.filter(
                 (check) => check.category === selection.category && check.expressId === selection.expressId && check.status !== "Passed" && check.status !== "Advisory"
               ).length;
-              return `<tr><td>${mapping.label}</td><td>${escapeHtml(space.longName)}</td><td>${escapeHtml(space.globalId)}</td><td>IfcSpace</td><td>${mapping.entityLabel}</td><td>${space.predefinedType || "Empty"} -> ${mapping.predefinedType}</td><td>${escapeHtml(space.objectType || "Empty")} -> ${mapping.objectType}</td><td>${warningCount}</td></tr>`;
+              return `<tr><td>${mapping.label}</td><td>${escapeHtml(space.longName)}</td><td class="mono">${escapeHtml(space.globalId)}</td><td>IfcSpace</td><td>${mapping.entityLabel}</td><td>${changeArrow(space.predefinedType || "Empty", mapping.predefinedType)}</td><td>${changeArrow(space.objectType || "Empty", mapping.objectType)}</td><td>${warningCount}</td></tr>`;
             })
             .join("")}</tbody>
         </table>
       </div>
       <div class="actions">
-        <button class="secondary" data-action="back">Back and Review</button>
+        <button class="ghost" data-action="back">${BackIcon()} Back to review</button>
         <button data-action="repair">${WrenchIcon()} Repair IFC</button>
       </div>
     </section>`;
@@ -242,19 +306,59 @@ function renderReview() {
 
 function renderDownload() {
   const report = state.repair?.report;
+  const passed = Boolean(report?.validation.passed);
   return `
     <section class="panel">
-      <div class="section-head">
-        <h2>Repair and Download</h2>
-        <p>${report?.validation.passed ? "Validation passed. The repaired IFC is ready to download." : "Validation failed. Review the blocking errors before retrying."}</p>
-      </div>
+      <h2 class="visually-hidden">Download</h2>
+      ${report ? completionPanel(report, passed) : ""}
+      ${report && !passed ? errorList(report.validation.blockingErrors) : ""}
+      ${report ? summaryBar(report) : ""}
       ${report ? reportSummary(report) : ""}
-      <div class="actions">
-        <button class="secondary" data-action="back">Back and Review</button>
-        <button data-action="download-ifc" ${report?.validation.passed ? "" : "disabled"}>${DownloadIcon()} Download Repaired IFC</button>
-        <button class="secondary" data-action="download-json">${FileJsonIcon()} Download Report JSON</button>
+      <div class="actions actions-download">
+        <button class="ghost" data-action="back">${BackIcon()} Back to review</button>
+        <div class="actions-download-right">
+          <button class="secondary" data-action="download-json">${FileJsonIcon()} Download JSON report</button>
+          <button data-action="download-ifc" ${passed ? "" : "disabled"}>${DownloadIcon()} Download repaired IFC</button>
+        </div>
       </div>
     </section>`;
+}
+
+function completionPanel(report: RepairResult["report"], passed: boolean) {
+  return `<div class="completion-panel ${passed ? "success" : "failed"}">
+    <span class="completion-icon">${passed ? CheckIcon() : AlertIcon()}</span>
+    <div>
+      <strong>${passed ? "Repair completed" : "Validation failed"}</strong>
+      <p>${passed ? `${report.objectsRepaired} objects repaired and validation passed.` : "Review the blocking errors below before downloading."}</p>
+    </div>
+  </div>`;
+}
+
+function errorList(errors: string[]) {
+  if (errors.length === 0) return "";
+  return `<div class="error-list">${errors.map((error) => `<p>${escapeHtml(error)}</p>`).join("")}</div>`;
+}
+
+function summaryBar(report: RepairResult["report"]) {
+  return `<div class="summary-bar">
+    <div class="summary-bar-item">
+      <span>Original file</span>
+      <strong title="${escapeHtml(report.originalFilename)}">${escapeHtml(report.originalFilename)}</strong>
+    </div>
+    <div class="summary-bar-item">
+      <span>Objects repaired</span>
+      <strong>${report.objectsRepaired}</strong>
+    </div>
+    <div class="summary-bar-item">
+      <span>Validation</span>
+      <strong class="${report.validation.passed ? "value-positive" : "value-negative"}">${report.validation.passed ? CheckIcon() : AlertIcon()}${report.validation.passed ? "Passed" : "Failed"}</strong>
+    </div>
+  </div>
+  <p class="muted output-filename">File will download as <span>${escapeHtml(report.outputFilename)}</span></p>`;
+}
+
+function changeArrow(oldValue: string, newValue: string) {
+  return `<span class="change"><span class="change-from">${escapeHtml(oldValue)}</span><span class="change-sep" aria-hidden="true">&#8594;</span><span class="change-to">${escapeHtml(newValue)}</span></span>`;
 }
 
 function bindEvents() {
@@ -276,14 +380,19 @@ function bindEvents() {
       matches: [],
       propertyChecks: [],
       warningsAccepted: false,
+      openPropertyGroups: {},
       repair: undefined
     });
     try {
       const bytes = await readFileWithProgress(file);
       setState({ status: "processing", loadingProgress: 75, message: `Opening ${file.name} with web-ifc...` });
-      const value = worker
-        ? await worker.inspectBuffer(bytes, file.name, file.size)
-        : { inspection: inspectIfc(new TextDecoder().decode(bytes), file.name, file.size), text: new TextDecoder().decode(bytes) };
+      const value = await (async () => {
+        if (worker) return worker.inspectBuffer(bytes, file.name, file.size);
+        // Decode once and reuse it -- decoding the same (potentially 100MB+) buffer twice
+        // was pure wasted work in the no-Worker fallback path.
+        const decoded = new TextDecoder().decode(bytes);
+        return { inspection: inspectIfc(decoded, file.name, file.size), text: decoded };
+      })();
       setState({
         sourceText: value.text,
         inspection: value.inspection,
@@ -312,20 +421,42 @@ function bindEvents() {
     input.addEventListener("input", () => {
       const category = input.dataset.search as RepairCategory;
       state.searches[category] = input.value;
-      updateLongNameList(category);
+      // filteredLongNameSpaces scans every IfcSpace on each call; for a very large model,
+      // debounce the (lightweight, non-full-page) LongName list patch so fast typing
+      // doesn't re-filter the whole list on every keystroke.
+      scheduleLongNameUpdate(category);
     })
   );
   document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((input) =>
     input.addEventListener("change", async () => {
       const category = input.dataset.select as RepairCategory;
-      const checked = [...document.querySelectorAll<HTMLInputElement>(`[data-select="${category}"]:checked`)].map((item) => Number(item.value));
-      const visibleIds = currentMatchIds(category);
-      const retainedIds = (state.selected[category] ?? []).filter((id) => !visibleIds.includes(id));
-      state.selected[category] = uniqueIds([...retainedIds, ...checked]);
+      if (input.checked) {
+        const id = Number(input.value);
+        state.selected[category] = uniqueIds([...(state.selected[category] ?? []), id]);
+      }
       await runMatch();
     })
   );
-  document.querySelector<HTMLInputElement>("#acceptWarnings")?.addEventListener("change", (event) => setState({ warningsAccepted: (event.target as HTMLInputElement).checked }));
+  document.querySelector<HTMLInputElement>("#acceptWarnings")?.addEventListener("change", (event) => {
+    const checked = (event.target as HTMLInputElement).checked;
+    setState({ warningsAccepted: checked });
+  });
+  document.querySelectorAll<HTMLDetailsElement>(".property-object[data-group-key]").forEach((details) => {
+    const summary = details.querySelector("summary");
+    summary?.addEventListener("click", () => {
+      const key = details.dataset.groupKey!;
+      // The native open/close toggle runs as part of this same click, but after
+      // listeners fire, so defer the read until it has applied. We deliberately do
+      // NOT call setState/render here -- the native DOM already reflects the correct
+      // open/closed state, and forcing a synchronous re-render on toggle both jumps
+      // the page and can retrigger the details' own toggle event on re-insertion.
+      // We only record the value so a LATER, unrelated re-render (e.g. ticking the
+      // confirm checkbox) can reproduce it instead of resetting every group.
+      setTimeout(() => {
+        state.openPropertyGroups[key] = details.open;
+      }, 0);
+    });
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => button.addEventListener("click", () => handleAction(button.dataset.action!, button.dataset.category as RepairCategory)));
   document.querySelectorAll<HTMLButtonElement>("[data-remove-selected]").forEach((button) =>
     button.addEventListener("click", async () => {
@@ -372,26 +503,64 @@ async function runMatch() {
   if (!state.inspection) return;
   const matches = worker ? await worker.match(state.inspection.spaces, state.searches, state.skipped, state.selected) : matchSpaces(state.inspection.spaces, state.searches, new Set(state.skipped), state.selected);
   const selected = { ...state.selected };
+  const searches = { ...state.searches };
   for (const match of matches) {
     selected[match.category] = uniqueIds(match.selectedIds).filter((id) => state.inspection!.spaces.some((space) => space.expressId === id));
+    if (match.status === "Found") {
+      // A single unambiguous match just locked in above as a selected pill — clear the box
+      // so the user can immediately search for another object under the same category.
+      searches[match.category] = "";
+    }
   }
-  setState({ selected, matches, status: matches.some((match) => match.status.includes("Multiple") || match.status.includes("Duplicate") || match.status === "Not found") ? "warning" : "waiting", message: "Matching complete. Resolve any missing, multiple, or duplicate assignments." });
+  const unresolved = matches.some((match) => {
+    if (state.skipped.includes(match.category)) return false;
+    if (match.status === "Duplicate assignment") return true;
+    return (selected[match.category] ?? []).length === 0;
+  });
+  setState({
+    selected,
+    searches,
+    matches,
+    status: unresolved ? "warning" : "waiting",
+    message: "Matching complete. Resolve any missing, multiple, or duplicate assignments."
+  });
+}
+
+let repairProgressTimer: ReturnType<typeof setInterval> | undefined;
+
+function startRepairProgress() {
+  stopRepairProgress();
+  repairProgressTimer = setInterval(() => {
+    const next = Math.min(92, state.loadingProgress + Math.random() * 7 + 3);
+    setState({ loadingProgress: next });
+  }, 220);
+}
+
+function stopRepairProgress() {
+  if (repairProgressTimer !== undefined) {
+    clearInterval(repairProgressTimer);
+    repairProgressTimer = undefined;
+  }
 }
 
 async function runRepair() {
-  setState({ status: "processing", message: "Repairing relationships and validating the output in memory..." });
+  setState({ status: "processing", message: "Repairing relationships and validating the output in memory...", loadingProgress: 8 });
+  startRepairProgress();
   try {
     const repair = worker
       ? await worker.repair(state.sourceText, state.inspection!.filename, selectedRepairs(), state.warningsAccepted)
       : repairIfc(state.sourceText, state.inspection!.filename, selectedRepairs(), state.warningsAccepted);
+    stopRepairProgress();
     setState({
       repair,
       stage: 4,
+      loadingProgress: 0,
       status: repair.report.validation.passed ? "validation-passed" : "validation-failed",
       message: repair.report.validation.passed ? "Repair completed and structural validation passed." : "Repair completed but structural validation found blocking errors."
     });
   } catch (error) {
-    setState({ status: "error", message: error instanceof Error ? error.message : String(error) });
+    stopRepairProgress();
+    setState({ status: "error", loadingProgress: 0, message: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -403,10 +572,6 @@ function selectedRepairs(): RepairSelection[] {
     const foundMatch = state.matches.find((match) => match.category === category && match.status === "Found");
     return foundMatch?.matches[0] ? [{ category, expressId: foundMatch.matches[0].expressId }] : [];
   });
-}
-
-function currentMatchIds(category: RepairCategory) {
-  return state.matches.find((match) => match.category === category)?.matches.map((space) => space.expressId) ?? [];
 }
 
 function uniqueIds(ids: number[]) {
@@ -424,6 +589,7 @@ async function goToProperties() {
     const checks = checkRequiredProperties(state.sourceText, selections);
     setState({
       propertyChecks: checks,
+      openPropertyGroups: {},
       stage: 2,
       status: checks.some((check) => check.status !== "Passed" && check.status !== "Advisory") ? "warning" : "waiting",
       message: "Property review is ready."
@@ -462,27 +628,41 @@ function propertyCategoryCard(category: RepairCategory) {
   return `<article class="property-card">
     <h3>${mapping.label}</h3>
     ${groupChecksByObject(checks)
-      .map(
-        (group) => `<section class="property-object">
-          <div class="object-label">
-            <strong>#${group.expressId} ${escapeHtml(group.longName || "No LongName")}</strong>
-            <small>GlobalId ${escapeHtml(group.globalId || "Unknown")}</small>
+      .map((group) => {
+        const issueCount = group.checks.filter((check) => check.status !== "Passed" && check.status !== "Advisory").length;
+        const groupKey = `${category}-${group.expressId}`;
+        return `<details class="property-object ${issueCount > 0 ? "has-issues" : ""}" data-group-key="${groupKey}" ${state.openPropertyGroups[groupKey] ? "open" : ""}>
+          <summary class="object-label">
+            <span class="object-label-text">
+              <strong>#${group.expressId} ${escapeHtml(group.longName || "No LongName")}</strong>
+              <small>GlobalId ${escapeHtml(group.globalId || "Unknown")}</small>
+            </span>
+            <span class="badge ${issueCount > 0 ? "badge-warning" : "badge-success"}">${issueCount > 0 ? `${issueCount} issue${issueCount === 1 ? "" : "s"}` : "All passed"}</span>
+            <span class="chevron" aria-hidden="true">${ChevronIcon()}</span>
+          </summary>
+          <div class="property-object-body">
+            ${group.checks
+              .map((check) => {
+                const missing = check.status !== "Passed" && check.status !== "Advisory";
+                const valueText = missing ? missingValueText(check) : `Current value: ${escapeHtml(check.currentValue)}`;
+                return `<div class="property-item ${missing ? "missing" : "passed"}">
+                  <div class="property-line"><strong>${check.property}</strong><span class="badge ${propertyBadgeClass(check.status)}">${check.status}</span></div>
+                  <span>${valueText}</span>
+                  <small>${check.propertySet} | ${check.expectedType} | Current type: ${check.currentType}</small>
+                </div>`;
+              })
+              .join("")}
           </div>
-          ${group.checks
-            .map((check) => {
-        const missing = check.status !== "Passed" && check.status !== "Advisory";
-        const valueText = missing ? missingValueText(check) : `Current value: ${escapeHtml(check.currentValue)}`;
-        return `<div class="property-item ${missing ? "missing" : "passed"}">
-          <div class="property-line"><strong>${check.property}</strong><span class="badge">${check.status}</span></div>
-          <span>${valueText}</span>
-          <small>${check.propertySet} | ${check.expectedType} | Current type: ${check.currentType}</small>
-        </div>`;
+        </details>`;
       })
       .join("")}
-        </section>`
-      )
-      .join("")}
   </article>`;
+}
+
+function propertyBadgeClass(status: PropertyCheckResult["status"]) {
+  if (status === "Passed") return "badge-success";
+  if (status === "Advisory") return "badge-neutral";
+  return "badge-warning";
 }
 
 function groupChecksByObject(checks: PropertyCheckResult[]) {
@@ -509,24 +689,24 @@ function missingValueText(check: PropertyCheckResult) {
 }
 
 function reportSummary(report: RepairResult["report"]) {
-  return `<div class="summary-grid">
-    ${metric("Original filename", report.originalFilename)}
-    ${metric("Output filename", report.outputFilename)}
-    ${metric("Objects repaired", String(report.objectsRepaired))}
-    ${metric("Validation", report.validation.passed ? "Passed" : "Failed")}
-  </div>
+  return `<h2 class="section-title">Repair summary</h2>
   <div class="table-wrap"><table><thead><tr><th>Category</th><th>GlobalId</th><th>Entity</th><th>PredefinedType</th><th>ObjectType / IFC SubType</th></tr></thead><tbody>${report.entityChanges
-    .map((change) => `<tr><td>${change.category}</td><td>${escapeHtml(change.globalId)}</td><td>${change.oldEntity} -> ${change.newEntity}</td><td>${change.oldPredefinedType} -> ${change.newPredefinedType}</td><td>${change.oldObjectType} -> ${change.newObjectType}</td></tr>`)
+    .map(
+      (change) =>
+        `<tr><td>${change.category}</td><td class="mono">${escapeHtml(change.globalId)}</td><td>${changeArrow(change.oldEntity, change.newEntity)}</td><td>${changeArrow(change.oldPredefinedType, change.newPredefinedType)}</td><td>${changeArrow(change.oldObjectType, change.newObjectType)}</td></tr>`
+    )
     .join("")}</tbody></table></div>
-  ${report.validation.blockingErrors.length ? `<div class="error-list">${report.validation.blockingErrors.map((error) => `<p>${escapeHtml(error)}</p>`).join("")}</div>` : ""}
-  <details><summary>Relationship and property report</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>`;
+  <details class="report-disclosure">
+    <summary><span class="chevron">${ChevronIcon()}</span><span>Relationship and property report</span></summary>
+    <div class="report-body"><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></div>
+  </details>`;
 }
 
 function availableLongNames(category: RepairCategory) {
   if (!state.inspection) return "";
   const spaces = filteredLongNameSpaces(category);
   return `<details class="available" open>
-    <summary>Available IfcSpace.LongName values <span data-longname-count="${category}">${spaces.length} shown</span></summary>
+    <summary>Available IfcSpace.LongName values <span data-longname-count="${category}">${longNameCountLabel(spaces.length)}</span></summary>
     <div class="longname-list" data-longname-list="${category}">${renderLongNameButtons(category, spaces)}</div>
   </details>`;
 }
@@ -546,11 +726,35 @@ function filteredLongNameSpaces(category: RepairCategory) {
   });
 }
 
+// Large models can have thousands of IfcSpace objects; rendering every one as a DOM button
+// (especially with an empty search, which matches everything) is needless work and a huge
+// DOM for the browser to manage. Cap what's actually rendered and tell the user to narrow
+// their search instead of silently truncating.
+const LONGNAME_RENDER_LIMIT = 200;
+
 function renderLongNameButtons(category: RepairCategory, spaces: IfcInspection["spaces"]) {
   if (spaces.length === 0) return `<p class="muted empty-list">No LongName values match this keyword.</p>`;
-  return spaces
+  const visible = spaces.slice(0, LONGNAME_RENDER_LIMIT);
+  const buttons = visible
     .map((space) => `<button class="longname" data-pick-longname="${category}" data-value="${escapeHtml(space.longName)}">#${space.expressId} ${escapeHtml(space.longName || "Empty LongName")}</button>`)
     .join("");
+  if (spaces.length <= LONGNAME_RENDER_LIMIT) return buttons;
+  return `${buttons}<p class="muted empty-list">Showing the first ${LONGNAME_RENDER_LIMIT} of ${spaces.length} matches. Refine your search to narrow the list.</p>`;
+}
+
+function longNameCountLabel(total: number) {
+  return total > LONGNAME_RENDER_LIMIT ? `${LONGNAME_RENDER_LIMIT} of ${total} shown` : `${total} shown`;
+}
+
+const longNameUpdateTimers: Partial<Record<RepairCategory, ReturnType<typeof setTimeout>>> = {};
+
+function scheduleLongNameUpdate(category: RepairCategory) {
+  const existing = longNameUpdateTimers[category];
+  if (existing) clearTimeout(existing);
+  longNameUpdateTimers[category] = setTimeout(() => {
+    delete longNameUpdateTimers[category];
+    updateLongNameList(category);
+  }, 120);
 }
 
 function updateLongNameList(category: RepairCategory) {
@@ -559,7 +763,7 @@ function updateLongNameList(category: RepairCategory) {
   if (!list) return;
   const spaces = filteredLongNameSpaces(category);
   list.innerHTML = renderLongNameButtons(category, spaces);
-  if (count) count.textContent = `${spaces.length} shown`;
+  if (count) count.textContent = longNameCountLabel(spaces.length);
   list.querySelectorAll<HTMLButtonElement>("[data-pick-longname]").forEach((button) =>
     button.addEventListener("click", async () => {
       const pickedCategory = button.dataset.pickLongname as RepairCategory;
@@ -653,6 +857,8 @@ const FileJsonIcon = () => icon("icon-json");
 const AlertIcon = () => icon("icon-alert");
 const CheckIcon = () => icon("icon-check");
 const ShieldIcon = () => icon("icon-shield");
+const BackIcon = () => icon("icon-arrow-left");
+const ChevronIcon = () => icon("icon-chevron");
 
 function icon(id: string) {
   return `<svg aria-hidden="true"><use href="#${id}"></use></svg>`;
@@ -669,6 +875,8 @@ document.body.insertAdjacentHTML(
     <symbol id="icon-alert" viewBox="0 0 24 24"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
     <symbol id="icon-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
     <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.7 8.9a1 1 0 0 1-.6 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.2-2.7a1.2 1.2 0 0 1 1.6 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
   </svg>`
 );
 

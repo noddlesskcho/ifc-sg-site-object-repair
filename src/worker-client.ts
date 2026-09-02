@@ -6,13 +6,18 @@ type WorkerRequest =
       type: "match";
       payload: { spaces: SpaceInfo[]; searches: Record<RepairCategory, string>; skipped: RepairCategory[]; selected: Partial<Record<RepairCategory, number[]>> };
     }
-  | { type: "properties"; payload: { text: string; selections: RepairSelection[] } }
-  | { type: "repair"; payload: { text: string; filename: string; selections: RepairSelection[]; warningsAccepted: boolean } };
+  | { type: "properties"; payload: { text?: string; selections: RepairSelection[] } }
+  | { type: "repair"; payload: { text?: string; filename: string; selections: RepairSelection[]; warningsAccepted: boolean } };
 
 export class IfcWorkerClient {
   private worker = new Worker(new URL("./ifc-worker.ts", import.meta.url), { type: "module" });
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
+  // The worker keeps its own copy of the last inspected text (see ifc-worker.ts). As long as
+  // callers keep passing back the exact same text they got from inspect/inspectBuffer -- which
+  // is how this app always uses it -- there is no need to structured-clone a potentially
+  // 100MB+ string across to the worker again for every properties/repair call.
+  private lastInspectedText: string | undefined;
 
   constructor() {
     this.worker.onmessage = (event) => {
@@ -26,13 +31,20 @@ export class IfcWorkerClient {
   }
 
   inspect(file: File) {
-    return file.arrayBuffer().then((bytes) =>
-      this.call<{ inspection: IfcInspection; text: string }>({ type: "inspect", payload: { bytes, filename: file.name, fileSize: file.size } })
-    );
+    return file.arrayBuffer().then((bytes) => this.doInspect(bytes, file.name, file.size));
   }
 
   inspectBuffer(bytes: ArrayBuffer, filename: string, fileSize: number) {
-    return this.call<{ inspection: IfcInspection; text: string }>({ type: "inspect", payload: { bytes, filename, fileSize } });
+    return this.doInspect(bytes, filename, fileSize);
+  }
+
+  private doInspect(bytes: ArrayBuffer, filename: string, fileSize: number) {
+    // Transfer (not copy) the buffer -- the caller doesn't need it back, and for a large
+    // file a structured-clone copy across to the worker is a real, avoidable cost.
+    return this.call<{ inspection: IfcInspection; text: string }>({ type: "inspect", payload: { bytes, filename, fileSize } }, [bytes]).then((value) => {
+      this.lastInspectedText = value.text;
+      return value;
+    });
   }
 
   match(spaces: SpaceInfo[], searches: Record<RepairCategory, string>, skipped: RepairCategory[], selected: Partial<Record<RepairCategory, number[]>>) {
@@ -40,19 +52,23 @@ export class IfcWorkerClient {
   }
 
   properties(text: string, selections: RepairSelection[]) {
-    return this.call<PropertyCheckResult[]>({ type: "properties", payload: { text, selections } });
+    return this.call<PropertyCheckResult[]>({ type: "properties", payload: { text: this.textForWorker(text), selections } });
   }
 
   repair(text: string, filename: string, selections: RepairSelection[], warningsAccepted: boolean) {
-    return this.call<RepairResult>({ type: "repair", payload: { text, filename, selections, warningsAccepted } });
+    return this.call<RepairResult>({ type: "repair", payload: { text: this.textForWorker(text), filename, selections, warningsAccepted } });
   }
 
-  private call<T>(request: WorkerRequest): Promise<T> {
+  private textForWorker(text: string): string | undefined {
+    return text === this.lastInspectedText ? undefined : text;
+  }
+
+  private call<T>(request: WorkerRequest, transfer: Transferable[] = []): Promise<T> {
     const id = this.nextId;
     this.nextId += 1;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      this.worker.postMessage({ id, ...request });
+      this.worker.postMessage({ id, ...request }, transfer);
     });
   }
 }

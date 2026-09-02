@@ -61,6 +61,14 @@ describe("file reading and inspection", () => {
   });
 });
 
+describe("inspection details", () => {
+  it("resolves the containing storey for every space via the aggregation index", () => {
+    const spaces = inspectIfc(baseIfc).spaces;
+    expect(spaces).toHaveLength(5);
+    for (const space of spaces) expect(space.storeyName).toBe("Ground");
+  });
+});
+
 describe("matching", () => {
   const spaces = inspectIfc(baseIfc).spaces;
 
@@ -134,6 +142,17 @@ describe("property checks", () => {
     const negative = baseIfc.replace("IFCAREAMEASURE(18.1)", "IFCAREAMEASURE(-2.)");
     expect(checkRequiredProperties(negative, selections).find((check) => check.property === "Area" && check.status === "Advisory")).toBeTruthy();
   });
+
+  it("accepts IfcLogical .T./.F. wherever IfcBoolean is expected, but not .U.", () => {
+    const logicalFalse = baseIfc.replace("IFCBOOLEAN(.F.)", "IFCLOGICAL(.F.)");
+    expect(checkRequiredProperties(logicalFalse, selections).find((check) => check.property === "VacantLand")?.status).toBe("Passed");
+
+    const logicalTrue = baseIfc.replace("IFCBOOLEAN(.F.)", "IFCLOGICAL(.T.)");
+    expect(checkRequiredProperties(logicalTrue, selections).find((check) => check.property === "VacantLand")?.status).toBe("Passed");
+
+    const logicalUnknown = baseIfc.replace("IFCBOOLEAN(.F.)", "IFCLOGICAL(.U.)");
+    expect(checkRequiredProperties(logicalUnknown, selections).find((check) => check.property === "VacantLand")?.status).toBe("No value");
+  });
 });
 
 describe("IFC conversion and validation", () => {
@@ -164,5 +183,25 @@ describe("IFC conversion and validation", () => {
 
   it("uses the required download filename", () => {
     expect(repairIfc(baseIfc, "Source.ifc", selections, true).outputFilename).toBe("Source_IFCSG_Repaired.ifc");
+  });
+
+  it("generates a properly formed 22-character compressed-UUID GlobalId for new relationships", () => {
+    const repaired = repairIfc(baseIfc, "Sample.ifc", selections, true).ifcText;
+    const match = repaired.match(/IFCRELCONTAINEDINSPATIALSTRUCTURE\('([^']+)'/);
+    expect(match).toBeTruthy();
+    const guid = match![1];
+    expect(guid).toHaveLength(22);
+    expect(guid).toMatch(/^[0-9A-Za-z_$]{22}$/);
+    // Generating it twice should not collide.
+    const repairedAgain = repairIfc(baseIfc, "Sample.ifc", selections, true).ifcText;
+    const guidAgain = repairedAgain.match(/IFCRELCONTAINEDINSPATIALSTRUCTURE\('([^']+)'/)![1];
+    expect(guidAgain).not.toBe(guid);
+  });
+
+  it("does not report a dangling reference for a '#123'-looking token inside quoted text", () => {
+    const withHashInText = baseIfc.replace("IFCTEXT('Residential')", "IFCTEXT('Unit #999 Residential')");
+    const repaired = repairIfc(withHashInText, "Sample.ifc", selections, true).ifcText;
+    const validation = validateRepairedIfc(repaired, selections, withHashInText);
+    expect(validation.blockingErrors.join(" ")).not.toContain("Dangling references");
   });
 });

@@ -39,6 +39,21 @@ export function splitStepArgs(input: string): string[] {
   return args;
 }
 
+// Direct charCode comparisons instead of per-character regex tests (/\s/.test(), /\d/.test(), ...).
+// parseStep's main loop runs once per character of the whole file, so for large (100MB+) IFC
+// files this is the single hottest path in the app -- swapping regex objects for numeric range
+// checks is a straightforward, behavior-preserving speedup here.
+function isWhitespaceCode(code: number): boolean {
+  // space, tab, LF, VT, FF, CR -- the whitespace STEP/IFC files actually contain.
+  return code === 32 || (code >= 9 && code <= 13);
+}
+function isDigitCode(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+function isIdentCode(code: number): boolean {
+  return isDigitCode(code) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95;
+}
+
 export function parseStep(text: string): StepModel {
   const records = new Map<number, StepRecord>();
   const firstRecord = text.search(/#\d+\s*=/);
@@ -47,7 +62,7 @@ export function parseStep(text: string): StepModel {
   let i = firstRecord >= 0 ? firstRecord : text.length;
 
   while (i < text.length) {
-    while (i < text.length && /\s/.test(text[i])) i += 1;
+    while (i < text.length && isWhitespaceCode(text.charCodeAt(i))) i += 1;
     if (text[i] !== "#") {
       footer = text.slice(i);
       break;
@@ -55,20 +70,20 @@ export function parseStep(text: string): StepModel {
     const recordStart = i;
     i += 1;
     let idText = "";
-    while (/\d/.test(text[i] ?? "")) {
+    while (isDigitCode(text.charCodeAt(i))) {
       idText += text[i];
       i += 1;
     }
-    while (/\s/.test(text[i] ?? "")) i += 1;
+    while (isWhitespaceCode(text.charCodeAt(i))) i += 1;
     if (text[i] !== "=") throw new Error(`Malformed STEP record #${idText}`);
     i += 1;
-    while (/\s/.test(text[i] ?? "")) i += 1;
+    while (isWhitespaceCode(text.charCodeAt(i))) i += 1;
     let entity = "";
-    while (/[A-Za-z0-9_]/.test(text[i] ?? "")) {
+    while (isIdentCode(text.charCodeAt(i))) {
       entity += text[i].toUpperCase();
       i += 1;
     }
-    while (/\s/.test(text[i] ?? "")) i += 1;
+    while (isWhitespaceCode(text.charCodeAt(i))) i += 1;
     if (text[i] !== "(") throw new Error(`Malformed STEP arguments for #${idText}`);
     const argsStart = i + 1;
     let depth = 1;
@@ -90,7 +105,7 @@ export function parseStep(text: string): StepModel {
     }
     if (depth !== 0) throw new Error(`Unclosed STEP arguments for #${idText}`);
     const argsText = text.slice(argsStart, i - 1);
-    while (/\s/.test(text[i] ?? "")) i += 1;
+    while (isWhitespaceCode(text.charCodeAt(i))) i += 1;
     if (text[i] !== ";") throw new Error(`Missing semicolon for #${idText}`);
     i += 1;
     const raw = text.slice(recordStart, i);
@@ -155,10 +170,35 @@ export function parseTypedValue(value: string): { type: string; value: string; e
 }
 
 export function collectReferences(args: string[]): number[] {
+  // Quote-aware: a "#123"-looking token inside a quoted text value (e.g. a name like
+  // 'Unit #12') is text, not an entity reference, and must not be counted -- otherwise
+  // dangling-reference validation can report false positives for perfectly valid files.
   const refs: number[] = [];
   for (const arg of args) {
-    const matches = arg.matchAll(/#(\d+)/g);
-    for (const match of matches) refs.push(Number(match[1]));
+    let inString = false;
+    for (let i = 0; i < arg.length; i += 1) {
+      const char = arg[i];
+      if (char === "'") {
+        if (inString && arg[i + 1] === "'") {
+          i += 1;
+        } else {
+          inString = !inString;
+        }
+        continue;
+      }
+      if (!inString && char === "#") {
+        let j = i + 1;
+        let digits = "";
+        while (j < arg.length && isDigitCode(arg.charCodeAt(j))) {
+          digits += arg[j];
+          j += 1;
+        }
+        if (digits) {
+          refs.push(Number(digits));
+          i = j - 1;
+        }
+      }
+    }
   }
   return refs;
 }
