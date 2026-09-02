@@ -73,13 +73,14 @@ function renderStage() {
 
 function renderSelect() {
   const warning = state.file && state.file.size > 100 * 1024 * 1024 ? `<p class="warning">This file is larger than 100 MB. You can continue, but processing may take longer.</p>` : "";
+  const loaded = Boolean(state.inspection);
   return `
     <section class="panel">
-      <div class="upload">
+      <div class="upload ${loaded ? "compact" : ""}">
         ${FileUpIcon()}
-        <label for="file">Choose IFC file</label>
+        <label for="file">${loaded ? "Replace IFC file" : "Choose IFC file"}</label>
         <input id="file" type="file" accept=".ifc" />
-        <p>Your IFC file is processed locally in your browser. It is not uploaded or stored online.</p>
+        <p>${loaded ? `Loaded: ${escapeHtml(state.inspection!.filename)}` : "Your IFC file is processed locally in your browser. It is not uploaded or stored online."}</p>
         ${warning}
       </div>
       ${state.inspection ? inspectionSummary(state.inspection) : ""}
@@ -120,7 +121,8 @@ function renderMatchCard(category: RepairCategory) {
         <button class="ghost" data-action="${skipped ? "unskip" : "skip"}" data-category="${category}">${skipped ? "Restore" : "Skip"}</button>
       </div>
       <p class="muted">Match count: ${spaces.length}. Same IfcSpace cannot be assigned twice.</p>
-      ${spaces.length === 0 ? availableLongNames() : spaces.map((space) => renderSpaceChoice(category, space, match)).join("")}
+      ${spaces.map((space) => renderSpaceChoice(category, space, match)).join("")}
+      ${availableLongNames(category)}
     </article>`;
 }
 
@@ -207,7 +209,18 @@ function bindEvents() {
   document.querySelector<HTMLInputElement>("#file")?.addEventListener("change", async (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file) return;
-    setState({ file, status: "reading", message: "Reading IFC and opening it with web-ifc..." });
+    setState({
+      file,
+      status: "reading",
+      message: "Reading IFC and opening it with web-ifc...",
+      searches: emptySearches(),
+      skipped: [],
+      selected: {},
+      matches: [],
+      propertyChecks: [],
+      warningsAccepted: false,
+      repair: undefined
+    });
     try {
       const value = worker ? await worker.inspect(file) : { inspection: inspectIfc(await file.text(), file.name, file.size), text: await file.text() };
       setState({
@@ -227,6 +240,7 @@ function bindEvents() {
     input.addEventListener("input", () => {
       const category = input.dataset.search as RepairCategory;
       state.searches[category] = input.value;
+      state.selected[category] = [];
     })
   );
   document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((input) =>
@@ -239,12 +253,12 @@ function bindEvents() {
   );
   document.querySelector<HTMLInputElement>("#acceptWarnings")?.addEventListener("change", (event) => setState({ warningsAccepted: (event.target as HTMLInputElement).checked }));
   document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => button.addEventListener("click", () => handleAction(button.dataset.action!, button.dataset.category as RepairCategory)));
-  document.querySelectorAll<HTMLButtonElement>("[data-copy-value]").forEach((button) =>
-    button.addEventListener("click", () => {
-      const category = CATEGORY_ORDER.find((item) => !state.searches[item]);
-      if (!category) return;
-      state.searches[category] = button.dataset.copyValue ?? "";
-      render();
+  document.querySelectorAll<HTMLButtonElement>("[data-pick-longname]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      const category = button.dataset.pickLongname as RepairCategory;
+      state.searches[category] = button.dataset.value ?? "";
+      state.selected[category] = [];
+      await runMatch();
     })
   );
 }
@@ -279,7 +293,11 @@ async function handleAction(action: string, category?: RepairCategory) {
 async function runMatch() {
   if (!state.inspection) return;
   const matches = worker ? await worker.match(state.inspection.spaces, state.searches, state.skipped, state.selected) : matchSpaces(state.inspection.spaces, state.searches, new Set(state.skipped), state.selected);
-  setState({ matches, status: matches.some((match) => match.status.includes("Multiple") || match.status.includes("Duplicate") || match.status === "Not found") ? "warning" : "waiting", message: "Matching complete. Resolve any missing, multiple, or duplicate assignments." });
+  const selected = { ...state.selected };
+  for (const match of matches) {
+    selected[match.category] = match.status === "Found" ? match.selectedIds : match.selectedIds.filter((id) => match.matches.some((space) => space.expressId === id));
+  }
+  setState({ selected, matches, status: matches.some((match) => match.status.includes("Multiple") || match.status.includes("Duplicate") || match.status === "Not found") ? "warning" : "waiting", message: "Matching complete. Resolve any missing, multiple, or duplicate assignments." });
 }
 
 async function runRepair() {
@@ -335,11 +353,15 @@ function reportSummary(report: RepairResult["report"]) {
   <details><summary>Relationship and property report</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>`;
 }
 
-function availableLongNames() {
+function availableLongNames(category: RepairCategory) {
   if (!state.inspection) return "";
-  return `<details class="available"><summary>Available IfcSpace.LongName values</summary>${state.inspection.spaces
-    .map((space) => `<button class="longname" data-copy-value="${escapeHtml(space.longName)}">${escapeHtml(space.longName || "Empty LongName")}</button>`)
+  return `<details class="available" open><summary>Available IfcSpace.LongName values</summary>${state.inspection.spaces
+    .map((space) => `<button class="longname" data-pick-longname="${category}" data-value="${escapeHtml(space.longName)}">#${space.expressId} ${escapeHtml(space.longName || "Empty LongName")}</button>`)
     .join("")}</details>`;
+}
+
+function emptySearches(): Record<RepairCategory, string> {
+  return { siteCoverage: "", siteBoundary: "", plantingAreas: "" };
 }
 
 function canVisit(index: number) {

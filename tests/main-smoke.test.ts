@@ -6,5 +6,6 @@ describe("browser startup", () => {
     await import("../src/main.ts");
     expect(document.querySelector("h1")?.textContent).toBe("Site Object Repair");
     expect(document.querySelector("#file")).toBeTruthy();
+    expect(document.querySelector(".upload.compact")).toBeFalsy();
   });
 });
