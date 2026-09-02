@@ -253,7 +253,16 @@ function bindEvents() {
     }
   });
 
-  document.querySelectorAll<HTMLButtonElement>("[data-stage]").forEach((button) => button.addEventListener("click", () => setState({ stage: Number(button.dataset.stage) })));
+  document.querySelectorAll<HTMLButtonElement>("[data-stage]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      const stage = Number(button.dataset.stage);
+      if (stage === 2) {
+        await goToProperties();
+        return;
+      }
+      setState({ stage });
+    })
+  );
   document.querySelectorAll<HTMLInputElement>("[data-search]").forEach((input) =>
     input.addEventListener("input", () => {
       const category = input.dataset.search as RepairCategory;
@@ -297,10 +306,7 @@ async function handleAction(action: string, category?: RepairCategory) {
     await runMatch();
   }
   if (action === "to-properties") {
-    setState({ status: "processing", message: "Checking IFC+SG property relationships..." });
-    const selections = selectedRepairs();
-    const checks = worker ? await worker.properties(state.sourceText, selections) : checkRequiredProperties(state.sourceText, selections);
-    setState({ propertyChecks: checks, stage: 2, status: checks.some((check) => check.status !== "Passed" && check.status !== "Advisory") ? "warning" : "waiting", message: "Property review is ready." });
+    await goToProperties();
   }
   if (action === "to-review") setState({ stage: 3, status: "waiting", message: "Review the entity and relationship changes before repair." });
   if (action === "repair") await runRepair();
@@ -336,7 +342,33 @@ async function runRepair() {
 }
 
 function selectedRepairs(): RepairSelection[] {
-  return CATEGORY_ORDER.flatMap((category) => (state.skipped.includes(category) ? [] : (state.selected[category] ?? []).map((expressId) => ({ category, expressId }))));
+  return CATEGORY_ORDER.flatMap((category) => {
+    if (state.skipped.includes(category)) return [];
+    const stored = state.selected[category] ?? [];
+    if (stored.length > 0) return stored.map((expressId) => ({ category, expressId }));
+    const foundMatch = state.matches.find((match) => match.category === category && match.status === "Found");
+    return foundMatch?.matches[0] ? [{ category, expressId: foundMatch.matches[0].expressId }] : [];
+  });
+}
+
+async function goToProperties() {
+  const selections = selectedRepairs();
+  if (selections.length === 0) {
+    setState({ stage: 1, status: "warning", message: "Select or match at least one IFC space before checking IFC+SG information." });
+    return;
+  }
+  setState({ status: "processing", message: "Checking IFC+SG property relationships..." });
+  try {
+    const checks = checkRequiredProperties(state.sourceText, selections);
+    setState({
+      propertyChecks: checks,
+      stage: 2,
+      status: checks.some((check) => check.status !== "Passed" && check.status !== "Advisory") ? "warning" : "waiting",
+      message: "Property review is ready."
+    });
+  } catch (error) {
+    setState({ stage: 1, status: "error", message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function inspectionSummary(inspection: IfcInspection) {
