@@ -59,6 +59,7 @@ describe.skipIf(!hasSamples)("supplied IFC files", () => {
 });
 
 const stairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/stairs_for checking.ifc";
+const largeStairPath = "C:/Users/ISS/Documents/Corenet X/Example IFC files from Consultants/Sample model from ADDP/BLOCK 41.ifc";
 const previouslyRepairedStairPaths = [
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired.ifc",
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (1).ifc",
@@ -92,6 +93,18 @@ describe.skipIf(!existsSync(stairPath))("supplied stair IFC file", () => {
     expect(repaired.ifcText).toMatch(/#157= IFCSTAIRFLIGHT\([^;]*,6,5,175\.,275\.,\.NOTDEFINED\.\);/);
     expect(repaired.ifcText).toMatch(/#213= IFCSTAIRFLIGHT\([^;]*,8,7,175\.,275\.,\.NOTDEFINED\.\);/);
     expect(repaired.ifcText).toMatch(/#234= IFCSTAIRFLIGHT\([^;]*,2,1,175\.,275\.,\.NOTDEFINED\.\);/);
+  });
+});
+
+describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", () => {
+  it("analyses and repairs without exceeding the JavaScript argument limit", () => {
+    const source = readFileSync(largeStairPath, "utf8");
+    const analysis = analyseStairFlights(source, "BLOCK 41.ifc");
+    const repaired = repairStairFlights(source, "BLOCK 41.ifc", analysis);
+
+    expect(analysis.flights.length).toBeGreaterThan(0);
+    expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
+    expect(repaired.report.validation.passed).toBe(true);
   });
 });
 

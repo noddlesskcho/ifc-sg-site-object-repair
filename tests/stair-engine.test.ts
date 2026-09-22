@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { analyseStairFlights, repairStairFlights, toleranceForUnit } from "../src/stair-engine";
+import { nextStepId } from "../src/step-parser";
 import type { StairGeometryEvidence } from "../src/types";
 
 const stairIfc = `ISO-10303-21;
@@ -57,6 +58,12 @@ END-ISO-10303-21;`
 );
 
 describe("IfcStairFlight analysis", () => {
+  it("allocates an entity id without spreading a large IFC record collection", () => {
+    const records = new Map<number, undefined>();
+    for (let id = 1; id <= 150_000; id += 1) records.set(id, undefined);
+    expect(nextStepId(records)).toBe(150_001);
+  });
+
   it("follows IfcRelAggregates, detects landings and calculates a straight flight in project units", () => {
     const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
     expect(analysis.lengthUnit).toBe("mm");

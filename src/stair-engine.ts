@@ -1,5 +1,5 @@
 import { makeIfcGuid } from "./ifc-engine";
-import { formatRefList, parseEnum, parseRef, parseRefList, parseStep, parseTypedValue, quoteStep, serializeStep, splitStepArgs, unquoteStep } from "./step-parser";
+import { formatRefList, nextStepId, parseEnum, parseRef, parseRefList, parseStep, parseTypedValue, quoteStep, serializeStep, splitStepArgs, unquoteStep } from "./step-parser";
 import type {
   StairAnalysisResult,
   StairConfidence,
@@ -100,7 +100,7 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
   const changes: StairRepairResult["report"]["changes"] = [];
   const originalArgs = new Map<number, string[]>();
   const psetIndex = buildPropertyIndex(model);
-  let nextId = Math.max(0, ...model.records.keys()) + 1;
+  let nextId = nextStepId(model.records);
   let propertyValuesWritten = 0;
 
   for (const flight of analysis.flights) {
@@ -317,8 +317,12 @@ function calculateTessellatedCounts(
         const indices = parseIndexList(face.args[0] ?? "");
         const vertices = indices.map((index) => points[index - 1]).filter((point): point is { x: number; y: number; z: number } => Boolean(point));
         if (vertices.length < 3) continue;
-        const minZ = Math.min(...vertices.map((point) => point.z));
-        const maxZ = Math.max(...vertices.map((point) => point.z));
+        let minZ = Number.POSITIVE_INFINITY;
+        let maxZ = Number.NEGATIVE_INFINITY;
+        for (const point of vertices) {
+          if (point.z < minZ) minZ = point.z;
+          if (point.z > maxZ) maxZ = point.z;
+        }
         if (maxZ - minZ > tolerance.elevation) continue;
         const normalZ = polygonNormalZ(vertices);
         if (normalZ <= tolerance.dimension * tolerance.dimension) continue;

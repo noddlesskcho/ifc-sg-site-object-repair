@@ -11,6 +11,14 @@ export interface StepModel {
   footer: string;
 }
 
+export function nextStepId(records: ReadonlyMap<number, unknown>): number {
+  let maximum = 0;
+  for (const id of records.keys()) {
+    if (id > maximum) maximum = id;
+  }
+  return maximum + 1;
+}
+
 export function splitStepArgs(input: string): string[] {
   const args: string[] = [];
   let depth = 0;

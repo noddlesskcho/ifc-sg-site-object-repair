@@ -18,6 +18,7 @@ import {
   parseRefList,
   parseStep,
   parseTypedValue,
+  nextStepId,
   quoteStep,
   serializeStep,
   splitStepArgs,
@@ -261,7 +262,7 @@ export function repairIfc(text: string, filename: string, selections: RepairSele
       existing.args[4] = formatRefList(merged);
       relationshipChanges.push(`Reused containment relationship #${existing.id} for storey #${storeyId}.`);
     } else {
-      const newId = Math.max(...model.records.keys()) + 1;
+      const newId = nextStepId(model.records);
       model.records.set(newId, {
         id: newId,
         entity: "IFCRELCONTAINEDINSPATIALSTRUCTURE",
