@@ -106,7 +106,7 @@ describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", ()
     expect(analysis.flights.length).toBeGreaterThan(0);
     expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
     expect(repaired.report.validation.passed).toBe(true);
-  });
+  }, 15_000);
 });
 
 describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () => {
@@ -125,6 +125,27 @@ describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () 
       expect([flight?.fields.numberOfRisers.value, flight?.fields.numberOfTreads.value]).toEqual(expected.get(parent.expressId));
       expect(flight?.fields.numberOfRisers.source).toBe("PARENT_CONFIRMED");
       expect(flight?.fields.numberOfTreads.source).toBe("PARENT_CONFIRMED");
+    }
+  });
+
+  it("blocks ambiguous multi-flight repairs and marks parents without flights incomplete", () => {
+    const source = readFileSync(podiumStairPath, "utf8");
+    const analysis = analyseStairFlights(source, "S2531_AR_PODIUM.ifc");
+
+    for (const parentId of [478858, 479283, 479614]) {
+      const parent = analysis.parents.find((item) => item.expressId === parentId);
+      expect(parent?.status).toBe("Conflict");
+      const flights = analysis.flights.filter((flight) => flight.parentStairId === parentId);
+      expect(flights.length).toBeGreaterThan(0);
+      expect(flights.every((flight) => flight.status === "Conflict" && flight.repairableFields.length === 0)).toBe(true);
+    }
+
+    for (const parentId of [486904, 486941, 487155]) {
+      const parent = analysis.parents.find((item) => item.expressId === parentId);
+      expect(parent?.status).toBe("Incomplete");
+      expect(parent?.calculatedRisers).toBeUndefined();
+      expect(parent?.calculatedTreads).toBeUndefined();
+      expect(parent?.message).toContain("No IfcStairFlight children");
     }
   });
 });

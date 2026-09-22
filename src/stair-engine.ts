@@ -85,6 +85,16 @@ export function analyseStairFlights(
   }
 
   const parents = buildParentValidations(model, parentLinks, flights, psets);
+  const conflictedParents = new Map(
+    parents.filter((parent) => parent.status === "Conflict").map((parent) => [parent.expressId, parent])
+  );
+  for (const flight of flights) {
+    const parentConflict = flight.parentStairId === undefined ? undefined : conflictedParents.get(flight.parentStairId);
+    if (!parentConflict) continue;
+    flight.status = "Conflict";
+    flight.repairableFields = [];
+    flight.evidence.push(`Parent stair #${parentConflict.expressId} count validation conflicts with its child totals; automatic repair is blocked.`);
+  }
   return {
     filename,
     schema,
@@ -537,8 +547,9 @@ function buildParentValidations(
     const expectedTreads = parentValues.numberOfTreads;
     const values = flightIds.map((id) => byId.get(id)?.fields.numberOfRisers.value);
     const treadValues = flightIds.map((id) => byId.get(id)?.fields.numberOfTreads.value);
-    const risersComplete = values.every((value) => value !== undefined);
-    const treadsComplete = treadValues.every((value) => value !== undefined);
+    const hasFlights = flightIds.length > 0;
+    const risersComplete = hasFlights && values.every((value) => value !== undefined);
+    const treadsComplete = hasFlights && treadValues.every((value) => value !== undefined);
     const calculatedRisers = risersComplete ? (values as number[]).reduce((sum, value) => sum + value, 0) : undefined;
     const calculatedTreads = treadsComplete ? (treadValues as number[]).reduce((sum, value) => sum + value, 0) : undefined;
     const calculatedHorizontalStages = calculatedTreads === undefined ? undefined : calculatedTreads + landingIds.length;
@@ -554,7 +565,9 @@ function buildParentValidations(
       expectedTreads !== calculatedHorizontalStages;
     if (hasParentCounts && incomplete) {
       status = "Incomplete";
-      message = "One or more child flight counts remain unresolved, so the parent totals cannot be fully checked.";
+      message = hasFlights
+        ? "One or more child flight counts remain unresolved, so the parent totals cannot be fully checked."
+        : "No IfcStairFlight children are aggregated under this parent, so its totals cannot be checked or repaired.";
     } else if (risersConflict || treadsConflict) {
       status = "Conflict";
       message = `Child totals: ${calculatedRisers ?? "unresolved"} risers, ${calculatedTreads ?? "unresolved"} treads, and ${calculatedHorizontalStages ?? "unresolved"} horizontal stages including landings; parent reports ${expectedRisers ?? "not set"} risers and ${expectedTreads ?? "not set"} treads.`;
