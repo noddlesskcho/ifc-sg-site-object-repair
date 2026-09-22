@@ -74,13 +74,14 @@ export function analyseStairFlights(
     const parentId = parentLinks.childToParent.get(record.id);
     const parent = parentId ? model.records.get(parentId) : undefined;
     const siblings = parentId ? parentLinks.parentToChildren.get(parentId) ?? [] : [];
+    const siblingFlightCount = siblings.filter((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT").length;
     const landingIds = siblings.filter((id) => {
       const sibling = model.records.get(id);
       return sibling?.entity === "IFCSLAB" && parseEnum(sibling.args[8] ?? "") === "LANDING";
     });
     const parentValues = parentId ? readStairProperties(psets.get(parentId) ?? [], model) : {};
     const flightPsetValues = readStairFlightProperties(psets.get(record.id) ?? [], model);
-    flights.push(analyseFlight(record, parent, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model));
+    flights.push(analyseFlight(record, parent, siblingFlightCount, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model));
   }
 
   const parents = buildParentValidations(model, parentLinks, flights, psets);
@@ -205,6 +206,7 @@ function formatFlightPropertyValue(field: StairFieldName, value: number): string
 function analyseFlight(
   record: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never,
   parent: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T | undefined : never,
+  siblingFlightCount: number,
   landingCount: number,
   parentValues: Partial<Record<StairFieldName, number>>,
   flightPsetValues: Partial<Record<StairFieldName, number>>,
@@ -228,28 +230,40 @@ function analyseFlight(
     const geometric = tessellatedValues[field] ?? geometryValues[field];
     const parentValue = parentValues[field];
     const flightPsetValue = validFallbackValue(field, flightPsetValues[field]);
+    const isCount = field === "numberOfRisers" || field === "numberOfTreads";
+    const correctsExtraBoundary = isCount
+      && siblingFlightCount === 1
+      && geometric !== undefined
+      && parentValue !== undefined
+      && geometric === parentValue + 1;
+    const geometricCandidate = correctsExtraBoundary ? parentValue : geometric;
+    if (correctsExtraBoundary) {
+      evidence.push(`${FIELD_LABELS[field]} uses single-flight parent value ${parentValue}; tessellated faces include one extra boundary level.`);
+    }
     if (current !== undefined) {
-      const comparison = geometric ?? flightPsetValue ?? ((field === "riserHeight" || field === "treadLength") ? parentValue : undefined);
+      const comparison = geometricCandidate ?? flightPsetValue ?? ((field === "riserHeight" || field === "treadLength") ? parentValue : undefined);
       fields[field] = fieldResult(current, current, "EXISTING", "High", comparison, tolerance, field);
       continue;
     }
     if (flightPsetValue !== undefined) {
-      const comparison = geometric ?? ((field === "riserHeight" || field === "treadLength") ? parentValue : undefined);
+      const comparison = geometricCandidate ?? ((field === "riserHeight" || field === "treadLength") ? parentValue : undefined);
       fields[field] = fieldResult(flightPsetValue, flightPsetValue, "FLIGHT_PSET", "High", comparison, tolerance, field);
       evidence.push(`${FIELD_LABELS[field]} already exists in Pset_StairFlightCommon with value ${flightPsetValue}.`);
       continue;
     }
-    if (geometric !== undefined) {
+    if (geometricCandidate !== undefined) {
       const comparison = (field === "riserHeight" || field === "treadLength") ? parentValue : undefined;
-      const confirmedByParent = comparison !== undefined && valuesMatch(field, geometric, comparison, tolerance);
-      const source = tessellatedValues[field] !== undefined
+      const confirmedByParent = comparison !== undefined && valuesMatch(field, geometricCandidate, comparison, tolerance);
+      const source = correctsExtraBoundary
+        ? "PARENT_CONFIRMED"
+        : tessellatedValues[field] !== undefined
         ? "TESSELLATED_GEOMETRY"
         : confirmedByParent
         ? "PARENT_CONFIRMED"
         : field === "numberOfTreads"
           ? "DERIVED"
           : "GEOMETRY";
-      fields[field] = fieldResult(undefined, geometric, source, "High", comparison, tolerance, field);
+      fields[field] = fieldResult(undefined, geometricCandidate, source, "High", comparison, tolerance, field);
       continue;
     }
     if ((field === "riserHeight" || field === "treadLength") && parentValue !== undefined) {

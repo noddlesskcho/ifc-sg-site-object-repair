@@ -60,6 +60,7 @@ describe.skipIf(!hasSamples)("supplied IFC files", () => {
 
 const stairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/stairs_for checking.ifc";
 const largeStairPath = "C:/Users/ISS/Documents/Corenet X/Example IFC files from Consultants/Sample model from ADDP/BLOCK 41.ifc";
+const podiumStairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2531_AR_PODIUM.ifc";
 const previouslyRepairedStairPaths = [
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired.ifc",
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (1).ifc",
@@ -105,6 +106,26 @@ describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", ()
     expect(analysis.flights.length).toBeGreaterThan(0);
     expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
     expect(repaired.report.validation.passed).toBe(true);
+  });
+});
+
+describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () => {
+  it("uses parent counts for the exact extra-boundary mesh pattern", () => {
+    const source = readFileSync(podiumStairPath, "utf8");
+    const analysis = analyseStairFlights(source, "S2531_AR_PODIUM.ifc");
+    const expected = new Map([
+      [446695, [10, 9]],
+      [470160, [3, 2]],
+      [472003, [5, 4]]
+    ]);
+
+    for (const parent of analysis.parents.filter((item) => expected.has(item.expressId))) {
+      expect(parent.status).toBe("Pass");
+      const flight = analysis.flights.find((item) => item.parentStairId === parent.expressId);
+      expect([flight?.fields.numberOfRisers.value, flight?.fields.numberOfTreads.value]).toEqual(expected.get(parent.expressId));
+      expect(flight?.fields.numberOfRisers.source).toBe("PARENT_CONFIRMED");
+      expect(flight?.fields.numberOfTreads.source).toBe("PARENT_CONFIRMED");
+    }
   });
 });
 
