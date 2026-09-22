@@ -1,4 +1,4 @@
-import type { IfcInspection, MatchResult, PropertyCheckResult, RepairCategory, RepairResult, RepairSelection, SpaceInfo } from "./types";
+import type { IfcInspection, MatchResult, PropertyCheckResult, RepairCategory, RepairResult, RepairSelection, SpaceInfo, StairAnalysisResult, StairRepairResult } from "./types";
 
 type WorkerRequest =
   | { type: "inspect"; payload: { bytes: ArrayBuffer; filename: string; fileSize: number } }
@@ -7,7 +7,9 @@ type WorkerRequest =
       payload: { spaces: SpaceInfo[]; searches: Record<RepairCategory, string>; skipped: RepairCategory[]; selected: Partial<Record<RepairCategory, number[]>> };
     }
   | { type: "properties"; payload: { text?: string; selections: RepairSelection[] } }
-  | { type: "repair"; payload: { text?: string; filename: string; selections: RepairSelection[]; warningsAccepted: boolean } };
+  | { type: "repair"; payload: { text?: string; filename: string; selections: RepairSelection[]; warningsAccepted: boolean } }
+  | { type: "analyse-stairs"; payload: { text?: string; filename: string } }
+  | { type: "repair-stairs"; payload: { text?: string; filename: string; analysis: StairAnalysisResult } };
 
 export class IfcWorkerClient {
   private worker = new Worker(new URL("./ifc-worker.ts", import.meta.url), { type: "module" });
@@ -57,6 +59,14 @@ export class IfcWorkerClient {
 
   repair(text: string, filename: string, selections: RepairSelection[], warningsAccepted: boolean) {
     return this.call<RepairResult>({ type: "repair", payload: { text: this.textForWorker(text), filename, selections, warningsAccepted } });
+  }
+
+  analyseStairs(text: string, filename: string) {
+    return this.call<StairAnalysisResult>({ type: "analyse-stairs", payload: { text: this.textForWorker(text), filename } });
+  }
+
+  repairStairs(text: string, filename: string, analysis: StairAnalysisResult) {
+    return this.call<StairRepairResult>({ type: "repair-stairs", payload: { text: this.textForWorker(text), filename, analysis } });
   }
 
   private textForWorker(text: string): string | undefined {

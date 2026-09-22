@@ -1,5 +1,6 @@
-import { IfcAPI } from "web-ifc";
+import { IfcAPI, IFCSTAIRFLIGHT } from "web-ifc";
 import { checkRequiredProperties, inspectIfc, matchSpaces, repairIfc, validateRepairedIfc } from "./ifc-engine";
+import { analyseStairFlights, repairStairFlights, toleranceForUnit } from "./stair-engine";
 import type { RepairCategory, RepairSelection } from "./types";
 
 let ifcApi: IfcAPI | undefined;
@@ -28,6 +29,103 @@ async function reopenWithWebIfc(text: string) {
   const schema = api.GetModelSchema(modelId);
   api.CloseModel(modelId);
   return schema;
+}
+
+async function analyseStairsWithGeometry(text: string, filename: string) {
+  const api = await getIfcApi();
+  const modelId = api.OpenModel(new TextEncoder().encode(text));
+  try {
+    const metadata = analyseStairFlights(text, filename);
+    const tolerance = toleranceForUnit(metadata.unitScaleToMetres);
+    const geometry = [] as import("./types").StairGeometryEvidence[];
+    api.StreamAllMeshesWithTypes(modelId, [IFCSTAIRFLIGHT], (mesh) => {
+      const vertices: Array<{ x: number; y: number; z: number }> = [];
+      const horizontalTriangles: Array<{ x: number; y: number; z: number; area: number }> = [];
+      for (let itemIndex = 0; itemIndex < mesh.geometries.size(); itemIndex += 1) {
+        const placed = mesh.geometries.get(itemIndex);
+        const shape = api.GetGeometry(modelId, placed.geometryExpressID);
+        try {
+          const rawVertices = api.GetVertexArray(shape.GetVertexData(), shape.GetVertexDataSize());
+          const indices = api.GetIndexArray(shape.GetIndexData(), shape.GetIndexDataSize());
+          const transformed: Array<{ x: number; y: number; z: number }> = [];
+          for (let offset = 0; offset < rawVertices.length; offset += 6) {
+            const point = transformPoint(rawVertices[offset], rawVertices[offset + 1], rawVertices[offset + 2], placed.flatTransformation);
+            transformed.push(point);
+            vertices.push(point);
+          }
+          for (let index = 0; index + 2 < indices.length; index += 3) {
+            const a = transformed[indices[index]];
+            const b = transformed[indices[index + 1]];
+            const c = transformed[indices[index + 2]];
+            if (!a || !b || !c) continue;
+            const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+            const ac = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+            const normal = {
+              x: ab.y * ac.z - ab.z * ac.y,
+              y: ab.z * ac.x - ab.x * ac.z,
+              z: ab.x * ac.y - ab.y * ac.x
+            };
+            const doubleArea = Math.hypot(normal.x, normal.y, normal.z);
+            if (doubleArea === 0 || Math.abs(normal.z) / doubleArea < tolerance.horizontalNormal) continue;
+            horizontalTriangles.push({ x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: (a.z + b.z + c.z) / 3, area: doubleArea / 2 });
+          }
+        } finally {
+          shape.delete();
+        }
+      }
+      const groups = clusterHorizontalTriangles(horizontalTriangles, tolerance.elevation);
+      let minZ = Number.POSITIVE_INFINITY;
+      let maxZ = Number.NEGATIVE_INFINITY;
+      for (const point of vertices) {
+        minZ = Math.min(minZ, point.z);
+        maxZ = Math.max(maxZ, point.z);
+      }
+      geometry.push({
+        expressId: mesh.expressID,
+        horizontalLevels: groups.map((group) => group.z),
+        levelCentres: groups.map((group) => ({ x: group.x, y: group.y, z: group.z })),
+        minZ: vertices.length ? minZ : 0,
+        maxZ: vertices.length ? maxZ : 0,
+        vertexCount: vertices.length,
+        geometryCount: mesh.geometries.size()
+      });
+    });
+    return analyseStairFlights(text, filename, geometry);
+  } finally {
+    api.CloseModel(modelId);
+  }
+}
+
+function transformPoint(x: number, y: number, z: number, matrix: Array<number>) {
+  return {
+    x: matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+    y: matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+    z: matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]
+  };
+}
+
+function clusterHorizontalTriangles(triangles: Array<{ x: number; y: number; z: number; area: number }>, tolerance: number) {
+  const sorted = [...triangles].sort((a, b) => a.z - b.z);
+  const groups: Array<{ x: number; y: number; z: number; area: number }> = [];
+  for (const triangle of sorted) {
+    let group: { x: number; y: number; z: number; area: number } | undefined;
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      if (Math.abs(groups[index].z - triangle.z) <= tolerance) {
+        group = groups[index];
+        break;
+      }
+    }
+    if (!group) {
+      groups.push({ ...triangle });
+      continue;
+    }
+    const total = group.area + triangle.area;
+    group.x = (group.x * group.area + triangle.x * triangle.area) / total;
+    group.y = (group.y * group.area + triangle.y * triangle.area) / total;
+    group.z = (group.z * group.area + triangle.z * triangle.area) / total;
+    group.area = total;
+  }
+  return groups;
 }
 
 self.onmessage = async (event: MessageEvent) => {
@@ -67,6 +165,21 @@ self.onmessage = async (event: MessageEvent) => {
         ...webIfcValidation,
         checks: [...webIfcValidation.checks, "Output reopened successfully with web-ifc/WebAssembly."]
       };
+      postMessage({ id, ok: true, value: repaired });
+    }
+
+    if (type === "analyse-stairs") {
+      const text = payload.text ?? lastInspectedText;
+      if (text === undefined) throw new Error("No IFC file has been inspected yet.");
+      postMessage({ id, ok: true, value: await analyseStairsWithGeometry(text, payload.filename) });
+    }
+
+    if (type === "repair-stairs") {
+      const text = payload.text ?? lastInspectedText;
+      if (text === undefined) throw new Error("No IFC file has been inspected yet.");
+      const repaired = repairStairFlights(text, payload.filename, payload.analysis);
+      await reopenWithWebIfc(repaired.ifcText);
+      repaired.report.validation.checks.push("Output reopened successfully with web-ifc/WebAssembly.");
       postMessage({ id, ok: true, value: repaired });
     }
   } catch (error) {

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { checkRequiredProperties, inspectIfc, repairIfc } from "../src/ifc-engine";
+import { analyseStairFlights, repairStairFlights } from "../src/stair-engine";
 import type { RepairSelection } from "../src/types";
 
 // These exercise the app against real Archicad/Revit sample exports that only exist on the
@@ -54,5 +55,57 @@ describe.skipIf(!hasSamples)("supplied IFC files", () => {
     expect(repaired.ifcText).toContain("'SITEBOUNDARY'");
     expect(repaired.ifcText).toContain(`#${plantingAreas.expressId}= IFCGEOGRAPHICELEMENT`);
     expect(repaired.ifcText).toContain("'PLANTINGAREAS'");
+  });
+});
+
+const stairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/stairs_for checking.ifc";
+const previouslyRepairedStairPaths = [
+  "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired.ifc",
+  "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (1).ifc",
+  "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (2).ifc",
+  "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (3).ifc",
+  "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (4).ifc"
+].filter(existsSync);
+
+describe.skipIf(!existsSync(stairPath))("supplied stair IFC file", () => {
+  it("adds resolved dimensions to each existing Pset_StairFlightCommon", () => {
+    const source = readFileSync(stairPath, "utf8");
+    const analysis = analyseStairFlights(source, "stairs_for checking.ifc");
+    expect(analysis.flights.map((flight) => [flight.expressId, flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([
+      [115, 2, 1],
+      [157, 6, 5],
+      [213, 8, 7],
+      [234, 2, 1]
+    ]);
+    expect(analysis.parents[0].status).toBe("Pass");
+    const repaired = repairStairFlights(source, "stairs_for checking.ifc", analysis);
+
+    expect(repaired.report.validation.passed).toBe(true);
+    expect(repaired.report.fieldsWritten).toBe(16);
+    expect(repaired.report.propertyValuesWritten).toBe(16);
+    expect(repaired.ifcText.match(/IFCPROPERTYSINGLEVALUE\('RiserHeight'/g)).toHaveLength(5);
+    expect(repaired.ifcText.match(/IFCPROPERTYSINGLEVALUE\('TreadLength'/g)).toHaveLength(5);
+    for (const statusPropertyId of [343, 356, 370, 383]) {
+      expect(repaired.ifcText).toContain(`#${statusPropertyId}= IFCPROPERTYENUMERATEDVALUE('Status'`);
+    }
+    expect(repaired.ifcText).toMatch(/#115= IFCSTAIRFLIGHT\([^;]*,2,1,175\.,275\.,\.NOTDEFINED\.\);/);
+    expect(repaired.ifcText).toMatch(/#157= IFCSTAIRFLIGHT\([^;]*,6,5,175\.,275\.,\.NOTDEFINED\.\);/);
+    expect(repaired.ifcText).toMatch(/#213= IFCSTAIRFLIGHT\([^;]*,8,7,175\.,275\.,\.NOTDEFINED\.\);/);
+    expect(repaired.ifcText).toMatch(/#234= IFCSTAIRFLIGHT\([^;]*,2,1,175\.,275\.,\.NOTDEFINED\.\);/);
+  });
+});
+
+describe.skipIf(previouslyRepairedStairPaths.length === 0)("previously repaired stair IFC files", () => {
+  it.each(previouslyRepairedStairPaths)("still recovers missing flight counts from %s", (path) => {
+    const source = readFileSync(path, "utf8");
+    const analysis = analyseStairFlights(source, path.split("/").at(-1) ?? "repaired.ifc");
+
+    expect(analysis.flights.map((flight) => [flight.expressId, flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([
+      [115, 2, 1],
+      [157, 6, 5],
+      [213, 8, 7],
+      [234, 2, 1]
+    ]);
+    expect(analysis.parents[0].status).toBe("Pass");
   });
 });

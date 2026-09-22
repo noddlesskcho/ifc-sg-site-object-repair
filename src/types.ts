@@ -118,3 +118,89 @@ export interface RepairResult {
   outputFilename: string;
   report: RepairReport;
 }
+
+export type StairFieldName = "numberOfRisers" | "numberOfTreads" | "riserHeight" | "treadLength";
+export type StairValueSource =
+  | "EXISTING"
+  | "FLIGHT_PSET"
+  | "GEOMETRY"
+  | "TESSELLATED_GEOMETRY"
+  | "PARENT_CONFIRMED"
+  | "PARENT_FALLBACK"
+  | "DERIVED"
+  | "UNRESOLVED";
+export type StairConfidence = "High" | "Medium" | "None";
+export type StairAnalysisStatus = "Already Complete" | "Ready to Repair" | "Partial" | "Conflict" | "Manual Review" | "Cannot Calculate";
+
+export interface StairGeometryEvidence {
+  expressId: number;
+  horizontalLevels: number[];
+  levelCentres: Array<{ x: number; y: number; z: number }>;
+  minZ: number;
+  maxZ: number;
+  vertexCount: number;
+  geometryCount: number;
+}
+
+export interface StairFieldAnalysis {
+  existing?: number;
+  calculated?: number;
+  value?: number;
+  source: StairValueSource;
+  confidence: StairConfidence;
+  conflict?: string;
+}
+
+export interface StairFlightAnalysis {
+  expressId: number;
+  globalId: string;
+  name: string;
+  parentStairId?: number;
+  parentStairName: string;
+  landingCount: number;
+  fields: Record<StairFieldName, StairFieldAnalysis>;
+  status: StairAnalysisStatus;
+  evidence: string[];
+  repairableFields: StairFieldName[];
+}
+
+export interface StairParentValidation {
+  expressId: number;
+  name: string;
+  flightIds: number[];
+  landingIds: number[];
+  expectedRisers?: number;
+  calculatedRisers?: number;
+  expectedTreads?: number;
+  calculatedTreads?: number;
+  calculatedHorizontalStages?: number;
+  status: "Pass" | "Conflict" | "Incomplete" | "No parent data";
+  message: string;
+}
+
+export interface StairAnalysisResult {
+  filename: string;
+  schema: string;
+  lengthUnit: "mm" | "m";
+  unitScaleToMetres: number;
+  flights: StairFlightAnalysis[];
+  parents: StairParentValidation[];
+  analysedAt: string;
+}
+
+export interface StairRepairReport {
+  originalFilename: string;
+  outputFilename: string;
+  flightsAnalysed: number;
+  flightsRepaired: number;
+  fieldsWritten: number;
+  propertyValuesWritten: number;
+  changes: Array<{ expressId: number; name: string; field: StairFieldName; oldValue: string; newValue: number; source: StairValueSource }>;
+  validation: ValidationResult;
+}
+
+export interface StairRepairResult {
+  ifcText: string;
+  outputFilename: string;
+  report: StairRepairReport;
+}

@@ -598,7 +598,7 @@ function makeOutputFilename(filename: string): string {
 // shape. This builds a real (version 4 shaped) UUID from secure random bytes and encodes
 // it with the standard compression so newly created relationships get a properly formed
 // GlobalId.
-function makeIfcGuid(): string {
+export function makeIfcGuid(): string {
   const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4

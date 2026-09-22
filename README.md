@@ -1,10 +1,12 @@
-# IFC+SG Site Object Repair
+# IFC Repair Utility
 
-Local static web app for BIM professionals repairing three IFC+SG site-related objects exported from Archicad as `IfcSpace`.
+Local static web app for BIM professionals repairing IFC+SG site-related objects and missing native `IfcStairFlight` information.
 
 ## Purpose
 
 The app reads an IFC STEP file in the browser, matches selected `IfcSpace.LongName` values, checks IFC+SG property information, converts selected spaces to the required occurrence entities, repairs relationships, validates the result, and lets the user download the repaired IFC plus a JSON report.
+
+The separate stair-flight workflow follows `IfcRelAggregates`, identifies child flights and `IfcSlab[LANDING]` objects, reads `Pset_StairCommon`, analyses web-ifc geometry in transformed coordinates, and fills only missing `NumberOfRisers`, `NumberOfTreads`, `RiserHeight`, and `TreadLength` attributes when the evidence is sufficient.
 
 ## Supported IFC Scope
 
@@ -14,6 +16,17 @@ The app reads an IFC STEP file in the browser, matches selected `IfcSpace.LongNa
 - Browser-only processing with File API, WebAssembly, web-ifc validation, and Blob downloads.
 - No backend, database, login, upload, or cloud storage.
 - No geometry editing.
+
+## IfcStairFlight Repair
+
+- Existing native stair-flight values are preserved.
+- Straight-flight geometry is analysed after placements and mapped transformations are resolved by web-ifc.
+- Millimetre and metre project units are supported.
+- Parent stair dimensions can confirm geometry or provide a medium-confidence fallback for `RiserHeight` and `TreadLength`.
+- Whole-stair riser and tread counts are never copied directly to every child flight.
+- Parent totals validate child risers and child treads plus separate landing stages.
+- Conflicts, irregular geometry, missing geometry, and unassigned flights are reported for manual review.
+- Repair output is re-parsed and reopened with web-ifc before download is enabled.
 
 ## Repair Mappings
 
@@ -75,7 +88,8 @@ The build uses relative asset paths and produces static files in `dist/`, suitab
 
 ## Known Limitations
 
-- Version 1 supports only the three fixed IFC+SG mappings.
+- Site-object repair supports only the three fixed IFC+SG mappings.
+- Automatic stair calculation focuses on conventional straight flights. Curved, spiral, winder, tapered, and non-uniform stairs require manual review.
 - It does not edit geometry.
 - It does not validate the permitted `BroadLandUse` vocabulary.
 - It preserves property relationships but removes space-only quantity relationships such as `Qto_SpaceBaseQuantities`.
