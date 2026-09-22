@@ -92,13 +92,21 @@ describe("IfcStairFlight analysis", () => {
     const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
     const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis);
     expect(repaired.ifcText).toContain("#31= IFCSTAIRFLIGHT('FLIGHT',#2,'SS - 057',$,$,#10,#20,'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.);");
-    expect(repaired.outputFilename).toBe("Stairs_StairFlight_Repaired.ifc");
+    expect(repaired.outputFilename).toBe("Stairs_repaired.ifc");
     expect(repaired.report.fieldsWritten).toBe(4);
     expect(repaired.report.propertyValuesWritten).toBe(4);
     expect(repaired.ifcText).toContain("'Pset_StairFlightCommon'");
     expect(repaired.ifcText).toContain("IFCPROPERTYSINGLEVALUE('NumberOfRiser',$,IFCCOUNTMEASURE(6.),$)");
     expect(repaired.ifcText).toContain("IFCPROPERTYSINGLEVALUE('RiserHeight',$,IFCPOSITIVELENGTHMEASURE(175.),$)");
     expect(repaired.report.validation.passed).toBe(true);
+  });
+
+  it("validates large-file repairs without reparsing duplicate full-file models", () => {
+    const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
+    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis, true);
+    expect(repaired.report.validation.passed).toBe(true);
+    expect(repaired.report.validation.checks[0]).toContain("without creating duplicate full-file parse trees");
+    expect(repaired.ifcText).toContain("'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.");
   });
 
   it("preserves existing values and reports a parent or geometry conflict instead of overwriting", () => {

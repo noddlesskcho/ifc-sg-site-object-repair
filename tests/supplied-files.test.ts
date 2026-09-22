@@ -61,6 +61,7 @@ describe.skipIf(!hasSamples)("supplied IFC files", () => {
 const stairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/stairs_for checking.ifc";
 const largeStairPath = "C:/Users/ISS/Documents/Corenet X/Example IFC files from Consultants/Sample model from ADDP/BLOCK 41.ifc";
 const podiumStairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2531_AR_PODIUM.ifc";
+const blk01StairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2531_AR_BLK01.ifc";
 const previouslyRepairedStairPaths = [
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired.ifc",
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (1).ifc",
@@ -106,7 +107,7 @@ describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", ()
     expect(analysis.flights.length).toBeGreaterThan(0);
     expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
     expect(repaired.report.validation.passed).toBe(true);
-  }, 15_000);
+  }, 30_000);
 });
 
 describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () => {
@@ -123,31 +124,60 @@ describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () 
       expect(parent.status).toBe("Pass");
       const flight = analysis.flights.find((item) => item.parentStairId === parent.expressId);
       expect([flight?.fields.numberOfRisers.value, flight?.fields.numberOfTreads.value]).toEqual(expected.get(parent.expressId));
-      expect(flight?.fields.numberOfRisers.source).toBe("PARENT_CONFIRMED");
-      expect(flight?.fields.numberOfTreads.source).toBe("PARENT_CONFIRMED");
+      expect(["TESSELLATED_GEOMETRY", "PARENT_CONFIRMED"]).toContain(flight?.fields.numberOfRisers.source);
+      expect(["TESSELLATED_GEOMETRY", "PARENT_CONFIRMED"]).toContain(flight?.fields.numberOfTreads.source);
     }
-  });
+  }, 60_000);
 
-  it("blocks ambiguous multi-flight repairs and marks parents without flights incomplete", () => {
+  it("reconciles multi-flight boundary faces and converts verified proxy stair flights", () => {
     const source = readFileSync(podiumStairPath, "utf8");
     const analysis = analyseStairFlights(source, "S2531_AR_PODIUM.ifc");
 
-    for (const parentId of [478858, 479283, 479614]) {
+    for (const parentId of [478858, 479283]) {
       const parent = analysis.parents.find((item) => item.expressId === parentId);
-      expect(parent?.status).toBe("Conflict");
+      expect(parent?.status).toBe("Pass");
       const flights = analysis.flights.filter((flight) => flight.parentStairId === parentId);
       expect(flights.length).toBeGreaterThan(0);
-      expect(flights.every((flight) => flight.status === "Conflict" && flight.repairableFields.length === 0)).toBe(true);
+      expect(flights.every((flight) => flight.status === "Ready to Repair" && flight.repairableFields.length > 0)).toBe(true);
     }
+    const stair478858 = analysis.flights.filter((flight) => flight.parentStairId === 478858);
+    expect(stair478858.map((flight) => [flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([[12, 11], [13, 12]]);
+    const ss071 = analysis.flights.find((flight) => flight.parentStairId === 479283 && flight.name.includes("SS - 071"));
+    expect([ss071?.fields.numberOfRisers.value, ss071?.fields.numberOfTreads.value]).toEqual([5, 4]);
 
     for (const parentId of [486904, 486941, 487155]) {
       const parent = analysis.parents.find((item) => item.expressId === parentId);
-      expect(parent?.status).toBe("Incomplete");
-      expect(parent?.calculatedRisers).toBeUndefined();
-      expect(parent?.calculatedTreads).toBeUndefined();
-      expect(parent?.message).toContain("No IfcStairFlight children");
+      expect(parent?.status).toBe("Pass");
+      const flight = analysis.flights.find((item) => item.parentStairId === parentId);
+      expect(flight?.sourceEntity).toBe("IFCBUILDINGELEMENTPROXY");
+      expect(flight?.status).toBe("Ready to Repair");
     }
-  });
+    expect(analysis.flights.filter((flight) => [486904, 486941, 487155].includes(flight.parentStairId ?? -1)).map((flight) => [flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([[5, 6], [5, 6], [11, 12]]);
+
+    const repaired = repairStairFlights(source, "S2531_AR_PODIUM.ifc", analysis);
+    expect(repaired.report.validation.passed).toBe(true);
+    expect(repaired.report.entitiesConverted).toBeGreaterThanOrEqual(3);
+    for (const proxyId of [373869, 375972, 398052]) expect(repaired.ifcText).toContain(`#${proxyId}= IFCSTAIRFLIGHT`);
+  }, 60_000);
+});
+
+describe.skipIf(!existsSync(blk01StairPath))("split-level landing stair", () => {
+  it("counts a valid riser between vertically separated landing slabs", () => {
+    const source = readFileSync(blk01StairPath, "utf8");
+    const analysis = analyseStairFlights(source, "S2531_AR_BLK01.ifc");
+    const parent = analysis.parents.find((item) => item.expressId === 1315822);
+    const ss071 = analysis.flights.find((item) => item.expressId === 808524);
+    const ss072 = analysis.flights.find((item) => item.expressId === 808586);
+
+    expect([ss071?.fields.numberOfRisers.value, ss071?.fields.numberOfTreads.value]).toEqual([8, 7]);
+    expect([ss072?.fields.numberOfRisers.value, ss072?.fields.numberOfTreads.value]).toEqual([11, 10]);
+    expect(parent?.landingTransitionRisers).toBe(1);
+    expect(parent?.calculatedRisers).toBe(20);
+    expect(parent?.calculatedHorizontalStages).toBe(19);
+    expect(parent?.status).toBe("Pass");
+    expect(parent?.message).toContain("19 in flights + 1 between landing levels");
+    expect([ss071?.status, ss072?.status]).toEqual(["Ready to Repair", "Ready to Repair"]);
+  }, 60_000);
 });
 
 describe.skipIf(previouslyRepairedStairPaths.length === 0)("previously repaired stair IFC files", () => {

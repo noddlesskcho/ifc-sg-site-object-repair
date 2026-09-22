@@ -67,24 +67,36 @@ export function analyseStairFlights(
   const geometryById = new Map(geometry.map((item) => [item.expressId, item]));
   const parentLinks = buildParentLinks(model);
   const psets = buildPropertyIndex(model);
+  const storeys = buildStoreyIndex(model);
 
   const flights: StairFlightAnalysis[] = [];
-  for (const record of model.records.values()) {
-    if (record.entity !== "IFCSTAIRFLIGHT") continue;
+  const candidateIds = new Set<number>();
+  for (const record of model.records.values()) if (record.entity === "IFCSTAIRFLIGHT") candidateIds.add(record.id);
+  for (const [parentId, children] of parentLinks.parentToChildren) {
+    if (children.some((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT")) continue;
+    const proxies = children.filter((id) => model.records.get(id)?.entity === "IFCBUILDINGELEMENTPROXY");
+    if (proxies.length === 1) candidateIds.add(proxies[0]);
+  }
+  for (const candidateId of candidateIds) {
+    const record = model.records.get(candidateId)!;
     const parentId = parentLinks.childToParent.get(record.id);
     const parent = parentId ? model.records.get(parentId) : undefined;
     const siblings = parentId ? parentLinks.parentToChildren.get(parentId) ?? [] : [];
-    const siblingFlightCount = siblings.filter((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT").length;
+    const siblingFlightCount = siblings.filter((id) => candidateIds.has(id)).length;
     const landingIds = siblings.filter((id) => {
       const sibling = model.records.get(id);
       return sibling?.entity === "IFCSLAB" && parseEnum(sibling.args[8] ?? "") === "LANDING";
     });
     const parentValues = parentId ? readStairProperties(psets.get(parentId) ?? [], model) : {};
-    const flightPsetValues = readStairFlightProperties(psets.get(record.id) ?? [], model);
-    flights.push(analyseFlight(record, parent, siblingFlightCount, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model));
+    const flightPsetValues = record.entity === "IFCSTAIRFLIGHT" ? readStairFlightProperties(psets.get(record.id) ?? [], model) : {};
+    const flight = analyseFlight(record, parent, siblingFlightCount, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model);
+    flight.storeyName = storeys.get(record.id) ?? (parentId ? storeys.get(parentId) : undefined);
+    flights.push(flight);
   }
 
-  const parents = buildParentValidations(model, parentLinks, flights, psets);
+  const landingTransitionCache = new Map<string, number>();
+  reconcileMultiFlightCounts(parentLinks, flights, psets, model, tolerance, landingTransitionCache);
+  const parents = buildParentValidations(model, parentLinks, flights, psets, tolerance, landingTransitionCache);
   const conflictedParents = new Map(
     parents.filter((parent) => parent.status === "Conflict").map((parent) => [parent.expressId, parent])
   );
@@ -106,19 +118,28 @@ export function analyseStairFlights(
   };
 }
 
-export function repairStairFlights(text: string, filename: string, analysis: StairAnalysisResult): StairRepairResult {
+export function repairStairFlights(text: string, filename: string, analysis: StairAnalysisResult, largeFileMode = false): StairRepairResult {
   const model = parseStep(text);
   const changes: StairRepairResult["report"]["changes"] = [];
   const originalArgs = new Map<number, string[]>();
   const psetIndex = buildPropertyIndex(model);
   let nextId = nextStepId(model.records);
   let propertyValuesWritten = 0;
+  const conversions: StairRepairResult["report"]["conversions"] = [];
+  const deleted = new Set<number>();
 
   for (const flight of analysis.flights) {
     if (flight.status === "Conflict") continue;
     const record = model.records.get(flight.expressId);
-    if (!record || record.entity !== "IFCSTAIRFLIGHT") continue;
+    if (!record || (record.entity !== "IFCSTAIRFLIGHT" && record.entity !== "IFCBUILDINGELEMENTPROXY")) continue;
     originalArgs.set(record.id, [...record.args]);
+    if (record.entity === "IFCBUILDINGELEMENTPROXY") {
+      const oldEntity = record.entity;
+      record.entity = "IFCSTAIRFLIGHT";
+      record.args = [...record.args.slice(0, 8), "$", "$", "$", "$", record.args[8] ?? ".NOTDEFINED."];
+      conversions.push({ expressId: record.id, globalId: flight.globalId, name: flight.name, oldEntity, newEntity: record.entity });
+      detachProxyType(model, record.id, deleted);
+    }
     for (const field of flight.repairableFields) {
       const result = flight.fields[field];
       const argIndex = FIELD_ARGS[field];
@@ -130,18 +151,23 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
     }
   }
 
-  const ifcText = serializeStep(model);
-  const validation = validateStairRepair(text, ifcText, changes, originalArgs);
+  const ifcText = serializeStep(model, deleted);
+  const convertedIds = new Set(conversions.map((item) => item.expressId));
+  const validation = largeFileMode
+    ? validateStairRepairInMemory(model, changes, originalArgs, convertedIds)
+    : validateStairRepair(text, ifcText, changes, originalArgs, convertedIds);
   return {
     ifcText,
-    outputFilename: filename.replace(/\.ifc$/i, "") + "_StairFlight_Repaired.ifc",
+    outputFilename: filename.replace(/\.ifc$/i, "") + "_repaired.ifc",
     report: {
       originalFilename: filename,
-      outputFilename: filename.replace(/\.ifc$/i, "") + "_StairFlight_Repaired.ifc",
+      outputFilename: filename.replace(/\.ifc$/i, "") + "_repaired.ifc",
       flightsAnalysed: analysis.flights.length,
       flightsRepaired: new Set(changes.map((change) => change.expressId)).size,
       fieldsWritten: changes.length,
       propertyValuesWritten,
+      entitiesConverted: conversions.length,
+      conversions,
       changes,
       validation
     }
@@ -225,14 +251,14 @@ function analyseFlight(
   model: ReturnType<typeof parseStep>
 ): StairFlightAnalysis {
   const evidence: string[] = [];
-  const nativeValues = Object.fromEntries(
+  const nativeValues = record.entity === "IFCSTAIRFLIGHT" ? Object.fromEntries(
     (Object.keys(FIELD_ARGS) as StairFieldName[]).map((field) => [field, parseOptionalNumber(record.args[FIELD_ARGS[field]])])
-  ) as Partial<Record<StairFieldName, number>>;
+  ) as Partial<Record<StairFieldName, number>> : {};
   const existing = Object.fromEntries(
     (Object.keys(FIELD_ARGS) as StairFieldName[]).map((field) => [field, nativeValues[field] ?? validFallbackValue(field, flightPsetValues[field])])
   ) as Partial<Record<StairFieldName, number>>;
   const geometryValues = calculateGeometryValues(geometry, tolerance, evidence);
-  const tessellatedValues = calculateTessellatedCounts(record, model, tolerance, parentValues.riserHeight, evidence);
+  const tessellatedValues = calculateTessellatedCounts(record, model, tolerance, parentValues.riserHeight, evidence, record.entity === "IFCBUILDINGELEMENTPROXY" ? parentValues : undefined);
   const fields = {} as Record<StairFieldName, StairFieldAnalysis>;
 
   for (const field of Object.keys(FIELD_ARGS) as StairFieldName[]) {
@@ -304,6 +330,7 @@ function analyseFlight(
     expressId: record.id,
     globalId: unquoteStep(record.args[0] ?? ""),
     name: unquoteStep(record.args[2] ?? "") || `#${record.id}`,
+    sourceEntity: record.entity as StairFlightAnalysis["sourceEntity"],
     parentStairId: parent?.id,
     parentStairName: parent ? unquoteStep(parent.args[2] ?? "") || `#${parent.id}` : "Unassigned",
     landingCount,
@@ -319,11 +346,59 @@ function calculateTessellatedCounts(
   model: ReturnType<typeof parseStep>,
   tolerance: StairTolerance,
   parentRiserHeight: number | undefined,
-  evidence: string[]
+  evidence: string[],
+  proxyParentValues?: Partial<Record<StairFieldName, number>>
 ): Partial<Record<StairFieldName, number>> {
-  const representationId = parseRef(flight.args[6] ?? "");
+  const upwardLevels = extractHorizontalLevels(flight, model, tolerance, true);
+  if (upwardLevels.length === 0) return {};
+  const mergeDistance = parentRiserHeight === undefined
+    ? tolerance.elevation
+    : Math.max(tolerance.elevation, parentRiserHeight * 0.25);
+  let levels = clusterNumericLevels(upwardLevels, mergeDistance);
+  if (parentRiserHeight !== undefined && levels.length >= 3) {
+    const filtered: number[] = [levels[0]];
+    for (let index = 1; index < levels.length - 1; index += 1) {
+      const previous = filtered.at(-1)!;
+      const current = levels[index];
+      const next = levels[index + 1];
+      const shortGap = current - previous < parentRiserHeight * 0.5;
+      const bridged = Math.abs((next - previous) - parentRiserHeight) <= Math.max(tolerance.dimension, parentRiserHeight * 0.1);
+      if (shortGap && bridged) {
+        evidence.push(`Ignored internal horizontal face at ${formatEvidenceNumber(current)} because adjacent levels confirm the parent riser spacing.`);
+        continue;
+      }
+      filtered.push(current);
+    }
+    filtered.push(levels.at(-1)!);
+    levels = filtered;
+  }
+  if (levels.length === 0) return {};
+  if (proxyParentValues) {
+    const expectedRisers = proxyParentValues.numberOfRisers;
+    const expectedTreads = proxyParentValues.numberOfTreads;
+    const intervalsMatch = parentRiserHeight !== undefined && consecutiveDiffs(levels).every((gap) => valuesMatch("riserHeight", gap, parentRiserHeight, tolerance));
+    if (expectedRisers !== undefined && expectedTreads !== undefined && levels.length - 1 === expectedRisers && levels.length === expectedTreads && intervalsMatch) {
+      evidence.push(`Proxy geometry contains ${levels.length} regular horizontal stages and confirms all parent stair values; conversion to IfcStairFlight is supported.`);
+      return { ...proxyParentValues };
+    }
+    evidence.push("Proxy geometry does not fully confirm the four parent stair values; automatic conversion is blocked.");
+    return {};
+  }
+  const numberOfTreads = levels.length;
+  const numberOfRisers = numberOfTreads + 1;
+  evidence.push(`Tessellated stair faces contain ${numberOfTreads} upward tread level${numberOfTreads === 1 ? "" : "s"}; inferred ${numberOfRisers} risers.`);
+  return { numberOfRisers, numberOfTreads };
+}
+
+function extractHorizontalLevels(
+  product: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never,
+  model: ReturnType<typeof parseStep>,
+  tolerance: StairTolerance,
+  upwardOnly: boolean
+): number[] {
+  const representationId = parseRef(product.args[6] ?? "");
   const representation = representationId === undefined ? undefined : model.records.get(representationId);
-  if (representation?.entity !== "IFCPRODUCTDEFINITIONSHAPE") return {};
+  if (representation?.entity !== "IFCPRODUCTDEFINITIONSHAPE") return [];
   const upwardLevels: number[] = [];
   for (const shapeId of parseRefList(representation.args[2] ?? "")) {
     const shape = model.records.get(shapeId);
@@ -349,21 +424,66 @@ function calculateTessellatedCounts(
         }
         if (maxZ - minZ > tolerance.elevation) continue;
         const normalZ = polygonNormalZ(vertices);
-        if (normalZ <= tolerance.dimension * tolerance.dimension) continue;
+        const minimumArea = tolerance.dimension * tolerance.dimension;
+        if (upwardOnly ? normalZ <= minimumArea : Math.abs(normalZ) <= minimumArea) continue;
         upwardLevels.push(average(vertices.map((point) => point.z)));
       }
     }
   }
-  if (upwardLevels.length === 0) return {};
-  const mergeDistance = parentRiserHeight === undefined
-    ? tolerance.elevation
-    : Math.max(tolerance.elevation, parentRiserHeight * 0.25);
-  const levels = clusterNumericLevels(upwardLevels, mergeDistance);
-  if (levels.length === 0) return {};
-  const numberOfTreads = levels.length;
-  const numberOfRisers = numberOfTreads + 1;
-  evidence.push(`Tessellated stair faces contain ${numberOfTreads} upward tread level${numberOfTreads === 1 ? "" : "s"}; inferred ${numberOfRisers} risers.`);
-  return { numberOfRisers, numberOfTreads };
+  const offset = productPlacementZ(product, model);
+  return upwardLevels.map((level) => level + offset);
+}
+
+function productPlacementZ(product: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never, model: ReturnType<typeof parseStep>): number {
+  const placementId = parseRef(product.args[5] ?? "");
+  if (placementId === undefined) return 0;
+  const visited = new Set<number>();
+  let currentId: number | undefined = placementId;
+  let z = 0;
+  while (currentId !== undefined && !visited.has(currentId)) {
+    visited.add(currentId);
+    const placement = model.records.get(currentId);
+    if (placement?.entity !== "IFCLOCALPLACEMENT") break;
+    const axisId = parseRef(placement.args[1] ?? "");
+    const axis = axisId === undefined ? undefined : model.records.get(axisId);
+    const pointId = axis?.entity === "IFCAXIS2PLACEMENT3D" || axis?.entity === "IFCAXIS2PLACEMENT2D" ? parseRef(axis.args[0] ?? "") : undefined;
+    const point = pointId === undefined ? undefined : model.records.get(pointId);
+    if (point?.entity === "IFCCARTESIANPOINT") {
+      const coordinates = parseNumberTuple(point.args[0] ?? "");
+      z += coordinates[2] ?? 0;
+    }
+    currentId = parseRef(placement.args[0] ?? "");
+  }
+  return z;
+}
+
+function parseNumberTuple(value: string): number[] {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) return [];
+  return splitStepArgs(trimmed.slice(1, -1)).map(Number).filter(Number.isFinite);
+}
+
+function countLandingTransitionRisers(
+  landingIds: number[],
+  parentRiserHeight: number | undefined,
+  model: ReturnType<typeof parseStep>,
+  tolerance: StairTolerance,
+  cache: Map<string, number>
+): number {
+  if (parentRiserHeight === undefined || landingIds.length < 2) return 0;
+  const cacheKey = `${parentRiserHeight}:${landingIds.join(",")}`;
+  const cached = cache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const topLevels = landingIds.flatMap((id) => {
+    const landing = model.records.get(id);
+    if (!landing) return [];
+    const levels = clusterNumericLevels(extractHorizontalLevels(landing, model, tolerance, false), tolerance.elevation);
+    return levels.length ? [Math.max(...levels)] : [];
+  });
+  const distinctTopLevels = clusterNumericLevels(topLevels, tolerance.elevation);
+  const result = consecutiveDiffs(distinctTopLevels).filter((gap) => valuesMatch("riserHeight", gap, parentRiserHeight, tolerance)).length;
+  cache.set(cacheKey, result);
+  return result;
 }
 
 function parsePointList3D(value: string): Array<{ x: number; y: number; z: number }> {
@@ -484,6 +604,68 @@ function buildParentLinks(model: ReturnType<typeof parseStep>) {
   return { childToParent, parentToChildren };
 }
 
+function buildStoreyIndex(model: ReturnType<typeof parseStep>) {
+  const result = new Map<number, string>();
+  for (const record of model.records.values()) {
+    if (record.entity !== "IFCRELCONTAINEDINSPATIALSTRUCTURE") continue;
+    const containerId = parseRef(record.args[5] ?? "");
+    const container = containerId === undefined ? undefined : model.records.get(containerId);
+    const name = container ? unquoteStep(container.args[2] ?? "") : "";
+    for (const id of parseRefList(record.args[4] ?? "")) result.set(id, name || (containerId ? `#${containerId}` : "Unknown"));
+  }
+  return result;
+}
+
+function reconcileMultiFlightCounts(
+  links: ReturnType<typeof buildParentLinks>,
+  flights: StairFlightAnalysis[],
+  psets: Map<number, number[]>,
+  model: ReturnType<typeof parseStep>,
+  tolerance: StairTolerance,
+  landingTransitionCache: Map<string, number>
+) {
+  const byId = new Map(flights.map((flight) => [flight.expressId, flight]));
+  for (const [parentId, children] of links.parentToChildren) {
+    const parentFlights = children.map((id) => byId.get(id)).filter((flight): flight is StairFlightAnalysis => Boolean(flight));
+    if (parentFlights.length < 2) continue;
+    const expected = readStairProperties(psets.get(parentId) ?? [], model);
+    if (expected.numberOfRisers === undefined || expected.numberOfTreads === undefined) continue;
+    const risers = parentFlights.map((flight) => flight.fields.numberOfRisers.value);
+    const treads = parentFlights.map((flight) => flight.fields.numberOfTreads.value);
+    if (risers.some((value) => value === undefined) || treads.some((value) => value === undefined)) continue;
+    const landingCount = children.filter((id) => model.records.get(id)?.entity === "IFCSLAB" && parseEnum(model.records.get(id)!.args[8] ?? "") === "LANDING").length;
+    const landingIds = children.filter((id) => model.records.get(id)?.entity === "IFCSLAB" && parseEnum(model.records.get(id)!.args[8] ?? "") === "LANDING");
+    const riserTotal = (risers as number[]).reduce((sum, value) => sum + value, 0);
+    const treadTotal = (treads as number[]).reduce((sum, value) => sum + value, 0);
+    const landingTransitionRisers = riserTotal < expected.numberOfRisers
+      ? countLandingTransitionRisers(landingIds, expected.riserHeight, model, tolerance, landingTransitionCache)
+      : 0;
+    if (riserTotal + landingTransitionRisers !== expected.numberOfRisers + 1 || treadTotal - 1 + landingCount !== expected.numberOfTreads) continue;
+    const finalFlight = parentFlights.at(-1)!;
+    for (const field of ["numberOfRisers", "numberOfTreads"] as const) {
+      const item = finalFlight.fields[field];
+      if (item.existing !== undefined || item.value === undefined || item.source !== "TESSELLATED_GEOMETRY") continue;
+      item.calculated = item.value - 1;
+      item.value -= 1;
+      item.source = "PARENT_CONFIRMED";
+    }
+    finalFlight.evidence.push("Removed one terminal mesh boundary from the final flight because the complete child sequence and landing count now match the parent stair totals exactly.");
+  }
+}
+
+function detachProxyType(model: ReturnType<typeof parseStep>, objectId: number, deleted: Set<number>) {
+  for (const relation of model.records.values()) {
+    if (relation.entity !== "IFCRELDEFINESBYTYPE") continue;
+    const ids = parseRefList(relation.args[4] ?? "");
+    if (!ids.includes(objectId)) continue;
+    const typeId = parseRef(relation.args[5] ?? "");
+    if (typeId === undefined || model.records.get(typeId)?.entity !== "IFCBUILDINGELEMENTPROXYTYPE") continue;
+    const remaining = ids.filter((id) => id !== objectId);
+    if (remaining.length) relation.args[4] = formatRefList(remaining);
+    else deleted.add(relation.id);
+  }
+}
+
 function buildPropertyIndex(model: ReturnType<typeof parseStep>): Map<number, number[]> {
   const index = new Map<number, number[]>();
   for (const record of model.records.values()) {
@@ -534,13 +716,16 @@ function buildParentValidations(
   model: ReturnType<typeof parseStep>,
   links: ReturnType<typeof buildParentLinks>,
   flights: StairFlightAnalysis[],
-  psets: Map<number, number[]>
+  psets: Map<number, number[]>,
+  tolerance: StairTolerance,
+  landingTransitionCache: Map<string, number>
 ): StairParentValidation[] {
   const byId = new Map(flights.map((flight) => [flight.expressId, flight]));
+  const storeys = buildStoreyIndex(model);
   const results: StairParentValidation[] = [];
   for (const [parentId, children] of links.parentToChildren) {
     const parent = model.records.get(parentId)!;
-    const flightIds = children.filter((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT");
+    const flightIds = children.filter((id) => byId.has(id));
     const landingIds = children.filter((id) => model.records.get(id)?.entity === "IFCSLAB" && parseEnum(model.records.get(id)!.args[8] ?? "") === "LANDING");
     const parentValues = readStairProperties(psets.get(parentId) ?? [], model);
     const expectedRisers = parentValues.numberOfRisers;
@@ -550,7 +735,11 @@ function buildParentValidations(
     const hasFlights = flightIds.length > 0;
     const risersComplete = hasFlights && values.every((value) => value !== undefined);
     const treadsComplete = hasFlights && treadValues.every((value) => value !== undefined);
-    const calculatedRisers = risersComplete ? (values as number[]).reduce((sum, value) => sum + value, 0) : undefined;
+    const flightRisers = risersComplete ? (values as number[]).reduce((sum, value) => sum + value, 0) : undefined;
+    const landingTransitionRisers = expectedRisers !== undefined && flightRisers !== undefined && flightRisers < expectedRisers
+      ? countLandingTransitionRisers(landingIds, parentValues.riserHeight, model, tolerance, landingTransitionCache)
+      : 0;
+    const calculatedRisers = flightRisers === undefined ? undefined : flightRisers + landingTransitionRisers;
     const calculatedTreads = treadsComplete ? (treadValues as number[]).reduce((sum, value) => sum + value, 0) : undefined;
     const calculatedHorizontalStages = calculatedTreads === undefined ? undefined : calculatedTreads + landingIds.length;
     let status: StairParentValidation["status"] = "No parent data";
@@ -570,7 +759,7 @@ function buildParentValidations(
         : "No IfcStairFlight children are aggregated under this parent, so its totals cannot be checked or repaired.";
     } else if (risersConflict || treadsConflict) {
       status = "Conflict";
-      message = `Child totals: ${calculatedRisers ?? "unresolved"} risers, ${calculatedTreads ?? "unresolved"} treads, and ${calculatedHorizontalStages ?? "unresolved"} horizontal stages including landings; parent reports ${expectedRisers ?? "not set"} risers and ${expectedTreads ?? "not set"} treads.`;
+      message = `Child totals: ${calculatedRisers ?? "unresolved"} risers${landingTransitionRisers ? ` (${flightRisers} in flights + ${landingTransitionRisers} between landing levels)` : ""}, ${calculatedTreads ?? "unresolved"} treads, and ${calculatedHorizontalStages ?? "unresolved"} horizontal stages including landings; parent reports ${expectedRisers ?? "not set"} risers and ${expectedTreads ?? "not set"} treads.`;
     } else if (hasParentCounts) {
       status = "Pass";
       const treadConvention =
@@ -579,9 +768,9 @@ function buildParentValidations(
           : expectedTreads === calculatedTreads
             ? `${calculatedTreads} flight treads (landings excluded)`
             : `${calculatedHorizontalStages} horizontal stages (landings included)`;
-      message = `Child totals match the parent: ${calculatedRisers ?? "risers not checked"} risers and ${treadConvention}.`;
+      message = `Child totals match the parent: ${calculatedRisers ?? "risers not checked"} risers${landingTransitionRisers ? ` (${flightRisers} in flights + ${landingTransitionRisers} between landing levels)` : ""} and ${treadConvention}.`;
     }
-    results.push({ expressId: parentId, name: unquoteStep(parent.args[2] ?? "") || `#${parentId}`, flightIds, landingIds, expectedRisers, calculatedRisers, expectedTreads, calculatedTreads, calculatedHorizontalStages, status, message });
+    results.push({ expressId: parentId, globalId: unquoteStep(parent.args[0] ?? ""), name: unquoteStep(parent.args[2] ?? "") || `#${parentId}`, storeyName: storeys.get(parentId) ?? flightIds.map((id) => byId.get(id)?.storeyName).find(Boolean), flightIds, landingIds, expectedRisers, calculatedRisers, landingTransitionRisers, expectedTreads, calculatedTreads, calculatedHorizontalStages, status, message });
   }
   return results;
 }
@@ -607,7 +796,8 @@ function validateStairRepair(
   originalText: string,
   repairedText: string,
   changes: StairRepairResult["report"]["changes"],
-  originals: Map<number, string[]>
+  originals: Map<number, string[]>,
+  convertedIds: Set<number>
 ): ValidationResult {
   const blockingErrors: string[] = [];
   const checks: string[] = [];
@@ -628,7 +818,8 @@ function validateStairRepair(
       blockingErrors.push(`#${id} is missing or no longer an IfcStairFlight.`);
       continue;
     }
-    for (let index = 0; index < Math.max(oldArgs.length, after.args.length); index += 1) {
+    const preservedCount = convertedIds.has(id) ? 8 : Math.max(oldArgs.length, after.args.length);
+    for (let index = 0; index < preservedCount; index += 1) {
       const isTarget = Object.values(FIELD_ARGS).includes(index);
       if (!isTarget && oldArgs[index] !== after.args[index]) blockingErrors.push(`#${id} changed unrelated argument ${index + 1}.`);
     }
@@ -641,6 +832,39 @@ function validateStairRepair(
   }
   if (changes.length === 0) warnings.push("No missing fields had sufficient evidence to repair.");
   else checks.push(`${changes.length} repaired IfcStairFlight values were re-read from both native attributes and Pset_StairFlightCommon.`);
+  return { passed: blockingErrors.length === 0, blockingErrors, warnings, checks };
+}
+
+function validateStairRepairInMemory(
+  repaired: ReturnType<typeof parseStep>,
+  changes: StairRepairResult["report"]["changes"],
+  originals: Map<number, string[]>,
+  convertedIds: Set<number>
+): ValidationResult {
+  const blockingErrors: string[] = [];
+  const warnings: string[] = [];
+  const checks = ["Large-file repair was validated against the in-memory STEP model without creating duplicate full-file parse trees."];
+  const repairedPsets = buildPropertyIndex(repaired);
+  for (const [id, oldArgs] of originals) {
+    const after = repaired.records.get(id);
+    if (!after || after.entity !== "IFCSTAIRFLIGHT") {
+      blockingErrors.push(`#${id} is missing or was not converted to IfcStairFlight.`);
+      continue;
+    }
+    const preservedCount = convertedIds.has(id) ? 8 : Math.max(oldArgs.length, after.args.length);
+    for (let index = 0; index < preservedCount; index += 1) {
+      const isTarget = Object.values(FIELD_ARGS).includes(index);
+      if (!isTarget && oldArgs[index] !== after.args[index]) blockingErrors.push(`#${id} changed unrelated argument ${index + 1}.`);
+    }
+  }
+  for (const change of changes) {
+    const value = parseOptionalNumber(repaired.records.get(change.expressId)?.args[FIELD_ARGS[change.field]]);
+    if (value === undefined || Math.abs(value - change.newValue) > 1e-8) blockingErrors.push(`#${change.expressId} ${FIELD_LABELS[change.field]} was not written correctly.`);
+    const propertyValue = readStairFlightProperties(repairedPsets.get(change.expressId) ?? [], repaired)[change.field];
+    if (propertyValue === undefined || Math.abs(propertyValue - change.newValue) > 1e-8) blockingErrors.push(`#${change.expressId} ${FIELD_LABELS[change.field]} was not written to Pset_StairFlightCommon correctly.`);
+  }
+  if (changes.length === 0) warnings.push("No missing fields had sufficient evidence to repair.");
+  else checks.push(`${changes.length} repaired values were verified in native attributes and Pset_StairFlightCommon.`);
   return { passed: blockingErrors.length === 0, blockingErrors, warnings, checks };
 }
 

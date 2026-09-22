@@ -1,4 +1,5 @@
 import { IfcAPI, IFCSTAIRFLIGHT } from "web-ifc";
+import { LARGE_FILE_THRESHOLD_BYTES } from "./constants";
 import { checkRequiredProperties, inspectIfc, matchSpaces, repairIfc, validateRepairedIfc } from "./ifc-engine";
 import { analyseStairFlights, repairStairFlights, toleranceForUnit } from "./stair-engine";
 import type { RepairCategory, RepairSelection } from "./types";
@@ -8,6 +9,8 @@ let ifcApi: IfcAPI | undefined;
 // re-send the (potentially 100MB+) file text over postMessage every time -- the main
 // thread only sends it explicitly when it differs from what this worker already has.
 let lastInspectedText: string | undefined;
+let lastInspectedFileSize = 0;
+const SUPPORTED_MESSAGE_TYPES = new Set(["inspect", "match", "properties", "repair", "analyse-stairs", "repair-stairs"]);
 
 async function getIfcApi() {
   if (!ifcApi) {
@@ -32,68 +35,76 @@ async function reopenWithWebIfc(text: string) {
 }
 
 async function analyseStairsWithGeometry(text: string, filename: string) {
+  if (lastInspectedFileSize >= LARGE_FILE_THRESHOLD_BYTES) return analyseStairFlights(text, filename);
   const api = await getIfcApi();
+  // Do not hold the expanded STEP index and WebIFC model concurrently.
+  const metadata = analyseStairFlights(text, filename);
   const modelId = api.OpenModel(new TextEncoder().encode(text));
+  const geometry = [] as import("./types").StairGeometryEvidence[];
   try {
-    const metadata = analyseStairFlights(text, filename);
     const tolerance = toleranceForUnit(metadata.unitScaleToMetres);
-    const geometry = [] as import("./types").StairGeometryEvidence[];
     api.StreamAllMeshesWithTypes(modelId, [IFCSTAIRFLIGHT], (mesh) => {
-      const vertices: Array<{ x: number; y: number; z: number }> = [];
-      const horizontalTriangles: Array<{ x: number; y: number; z: number; area: number }> = [];
-      for (let itemIndex = 0; itemIndex < mesh.geometries.size(); itemIndex += 1) {
-        const placed = mesh.geometries.get(itemIndex);
-        const shape = api.GetGeometry(modelId, placed.geometryExpressID);
-        try {
-          const rawVertices = api.GetVertexArray(shape.GetVertexData(), shape.GetVertexDataSize());
-          const indices = api.GetIndexArray(shape.GetIndexData(), shape.GetIndexDataSize());
-          const transformed: Array<{ x: number; y: number; z: number }> = [];
-          for (let offset = 0; offset < rawVertices.length; offset += 6) {
-            const point = transformPoint(rawVertices[offset], rawVertices[offset + 1], rawVertices[offset + 2], placed.flatTransformation);
-            transformed.push(point);
-            vertices.push(point);
+      try {
+        const vertices: Array<{ x: number; y: number; z: number }> = [];
+        const horizontalTriangles: Array<{ x: number; y: number; z: number; area: number }> = [];
+        for (let itemIndex = 0; itemIndex < mesh.geometries.size(); itemIndex += 1) {
+          const placed = mesh.geometries.get(itemIndex);
+          const shape = api.GetGeometry(modelId, placed.geometryExpressID);
+          try {
+            const rawVertices = api.GetVertexArray(shape.GetVertexData(), shape.GetVertexDataSize());
+            const indices = api.GetIndexArray(shape.GetIndexData(), shape.GetIndexDataSize());
+            const transformed: Array<{ x: number; y: number; z: number }> = [];
+            for (let offset = 0; offset < rawVertices.length; offset += 6) {
+              const point = transformPoint(rawVertices[offset], rawVertices[offset + 1], rawVertices[offset + 2], placed.flatTransformation);
+              transformed.push(point);
+              vertices.push(point);
+            }
+            for (let index = 0; index + 2 < indices.length; index += 3) {
+              const a = transformed[indices[index]];
+              const b = transformed[indices[index + 1]];
+              const c = transformed[indices[index + 2]];
+              if (!a || !b || !c) continue;
+              const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+              const ac = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+              const normal = {
+                x: ab.y * ac.z - ab.z * ac.y,
+                y: ab.z * ac.x - ab.x * ac.z,
+                z: ab.x * ac.y - ab.y * ac.x
+              };
+              const doubleArea = Math.hypot(normal.x, normal.y, normal.z);
+              if (doubleArea === 0 || Math.abs(normal.z) / doubleArea < tolerance.horizontalNormal) continue;
+              horizontalTriangles.push({ x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: (a.z + b.z + c.z) / 3, area: doubleArea / 2 });
+            }
+          } finally {
+            shape.delete();
           }
-          for (let index = 0; index + 2 < indices.length; index += 3) {
-            const a = transformed[indices[index]];
-            const b = transformed[indices[index + 1]];
-            const c = transformed[indices[index + 2]];
-            if (!a || !b || !c) continue;
-            const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
-            const ac = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
-            const normal = {
-              x: ab.y * ac.z - ab.z * ac.y,
-              y: ab.z * ac.x - ab.x * ac.z,
-              z: ab.x * ac.y - ab.y * ac.x
-            };
-            const doubleArea = Math.hypot(normal.x, normal.y, normal.z);
-            if (doubleArea === 0 || Math.abs(normal.z) / doubleArea < tolerance.horizontalNormal) continue;
-            horizontalTriangles.push({ x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: (a.z + b.z + c.z) / 3, area: doubleArea / 2 });
-          }
-        } finally {
-          shape.delete();
         }
+        const groups = clusterHorizontalTriangles(horizontalTriangles, tolerance.elevation);
+        let minZ = Number.POSITIVE_INFINITY;
+        let maxZ = Number.NEGATIVE_INFINITY;
+        for (const point of vertices) {
+          minZ = Math.min(minZ, point.z);
+          maxZ = Math.max(maxZ, point.z);
+        }
+        geometry.push({
+          expressId: mesh.expressID,
+          horizontalLevels: groups.map((group) => group.z),
+          levelCentres: groups.map((group) => ({ x: group.x, y: group.y, z: group.z })),
+          minZ: vertices.length ? minZ : 0,
+          maxZ: vertices.length ? maxZ : 0,
+          vertexCount: vertices.length,
+          geometryCount: mesh.geometries.size()
+        });
+      } finally {
+        // Some web-ifc 0.0.70 runtimes return a disposable embind FlatMesh while
+        // others return a plain callback object, despite the shared type declaration.
+        if (typeof mesh.delete === "function") mesh.delete();
       }
-      const groups = clusterHorizontalTriangles(horizontalTriangles, tolerance.elevation);
-      let minZ = Number.POSITIVE_INFINITY;
-      let maxZ = Number.NEGATIVE_INFINITY;
-      for (const point of vertices) {
-        minZ = Math.min(minZ, point.z);
-        maxZ = Math.max(maxZ, point.z);
-      }
-      geometry.push({
-        expressId: mesh.expressID,
-        horizontalLevels: groups.map((group) => group.z),
-        levelCentres: groups.map((group) => ({ x: group.x, y: group.y, z: group.z })),
-        minZ: vertices.length ? minZ : 0,
-        maxZ: vertices.length ? maxZ : 0,
-        vertexCount: vertices.length,
-        geometryCount: mesh.geometries.size()
-      });
     });
-    return analyseStairFlights(text, filename, geometry);
   } finally {
     api.CloseModel(modelId);
   }
+  return analyseStairFlights(text, filename, geometry);
 }
 
 function transformPoint(x: number, y: number, z: number, matrix: Array<number>) {
@@ -128,17 +139,24 @@ function clusterHorizontalTriangles(triangles: Array<{ x: number; y: number; z: 
   return groups;
 }
 
+async function postRepairResult(id: number, result: import("./types").RepairResult | import("./types").StairRepairResult) {
+  // Yield after the repair function returns so its large parse model can become collectible
+  // before allocating the transferable output bytes.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const bytes = new TextEncoder().encode(result.ifcText);
+  postMessage({ id, ok: true, value: { ...result, ifcText: "", ifcBytes: bytes.buffer } }, [bytes.buffer]);
+}
+
 self.onmessage = async (event: MessageEvent) => {
   const { id, type, payload } = event.data;
   try {
+    if (!SUPPORTED_MESSAGE_TYPES.has(type)) throw new Error(`Unsupported worker message type: ${String(type)}`);
     if (type === "inspect") {
       const text = new TextDecoder().decode(payload.bytes);
       lastInspectedText = text;
+      lastInspectedFileSize = payload.fileSize;
       const inspection = inspectIfc(text, payload.filename, payload.fileSize);
-      if (inspection.schema.toUpperCase() === "IFC4") {
-        await reopenWithWebIfc(text);
-      }
-      postMessage({ id, ok: true, value: { inspection, text } });
+      postMessage({ id, ok: true, value: { inspection } });
     }
 
     if (type === "match") {
@@ -159,13 +177,17 @@ self.onmessage = async (event: MessageEvent) => {
       const text = payload.text ?? lastInspectedText;
       if (text === undefined) throw new Error("No IFC file has been inspected yet.");
       const repaired = repairIfc(text, payload.filename, payload.selections as RepairSelection[], payload.warningsAccepted);
-      await reopenWithWebIfc(repaired.ifcText);
-      const webIfcValidation = validateRepairedIfc(repaired.ifcText, payload.selections as RepairSelection[], text);
-      repaired.report.validation = {
-        ...webIfcValidation,
-        checks: [...webIfcValidation.checks, "Output reopened successfully with web-ifc/WebAssembly."]
-      };
-      postMessage({ id, ok: true, value: repaired });
+      if (lastInspectedFileSize < LARGE_FILE_THRESHOLD_BYTES) {
+        await reopenWithWebIfc(repaired.ifcText);
+        const webIfcValidation = validateRepairedIfc(repaired.ifcText, payload.selections as RepairSelection[], text);
+        repaired.report.validation = {
+          ...webIfcValidation,
+          checks: [...webIfcValidation.checks, "Output reopened successfully with web-ifc/WebAssembly."]
+        };
+      } else {
+        repaired.report.validation.checks.push("Large-file mode reused in-memory STEP validation without creating duplicate full-file parse trees or a WebIFC model.");
+      }
+      await postRepairResult(id, repaired);
     }
 
     if (type === "analyse-stairs") {
@@ -177,10 +199,14 @@ self.onmessage = async (event: MessageEvent) => {
     if (type === "repair-stairs") {
       const text = payload.text ?? lastInspectedText;
       if (text === undefined) throw new Error("No IFC file has been inspected yet.");
-      const repaired = repairStairFlights(text, payload.filename, payload.analysis);
-      await reopenWithWebIfc(repaired.ifcText);
-      repaired.report.validation.checks.push("Output reopened successfully with web-ifc/WebAssembly.");
-      postMessage({ id, ok: true, value: repaired });
+      const repaired = repairStairFlights(text, payload.filename, payload.analysis, lastInspectedFileSize >= LARGE_FILE_THRESHOLD_BYTES);
+      if (lastInspectedFileSize < LARGE_FILE_THRESHOLD_BYTES) {
+        await reopenWithWebIfc(repaired.ifcText);
+        repaired.report.validation.checks.push("Output reopened successfully with web-ifc/WebAssembly.");
+      } else {
+        repaired.report.validation.checks.push("Large-file mode used STEP parser validation without simultaneously opening a WebIFC model.");
+      }
+      await postRepairResult(id, repaired);
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });

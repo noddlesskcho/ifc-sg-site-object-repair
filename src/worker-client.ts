@@ -11,14 +11,14 @@ type WorkerRequest =
   | { type: "analyse-stairs"; payload: { text?: string; filename: string } }
   | { type: "repair-stairs"; payload: { text?: string; filename: string; analysis: StairAnalysisResult } };
 
+const WORKER_TEXT_HANDLE = "__IFC_SOURCE_HELD_BY_WORKER__";
+
 export class IfcWorkerClient {
   private worker = new Worker(new URL("./ifc-worker.ts", import.meta.url), { type: "module" });
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
-  // The worker keeps its own copy of the last inspected text (see ifc-worker.ts). As long as
-  // callers keep passing back the exact same text they got from inspect/inspectBuffer -- which
-  // is how this app always uses it -- there is no need to structured-clone a potentially
-  // 100MB+ string across to the worker again for every properties/repair call.
+  // The source text stays exclusively in the worker. The page stores this small opaque handle
+  // instead of receiving another full copy of a potentially very large IFC string.
   private lastInspectedText: string | undefined;
 
   constructor() {
@@ -43,9 +43,9 @@ export class IfcWorkerClient {
   private doInspect(bytes: ArrayBuffer, filename: string, fileSize: number) {
     // Transfer (not copy) the buffer -- the caller doesn't need it back, and for a large
     // file a structured-clone copy across to the worker is a real, avoidable cost.
-    return this.call<{ inspection: IfcInspection; text: string }>({ type: "inspect", payload: { bytes, filename, fileSize } }, [bytes]).then((value) => {
-      this.lastInspectedText = value.text;
-      return value;
+    return this.call<{ inspection: IfcInspection }>({ type: "inspect", payload: { bytes, filename, fileSize } }, [bytes]).then((value) => {
+      this.lastInspectedText = WORKER_TEXT_HANDLE;
+      return { inspection: value.inspection, text: WORKER_TEXT_HANDLE };
     });
   }
 

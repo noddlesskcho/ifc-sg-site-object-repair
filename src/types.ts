@@ -115,6 +115,7 @@ export interface ValidationResult {
 
 export interface RepairResult {
   ifcText: string;
+  ifcBytes?: ArrayBuffer;
   outputFilename: string;
   report: RepairReport;
 }
@@ -155,6 +156,8 @@ export interface StairFlightAnalysis {
   expressId: number;
   globalId: string;
   name: string;
+  sourceEntity: "IFCSTAIRFLIGHT" | "IFCBUILDINGELEMENTPROXY";
+  storeyName?: string;
   parentStairId?: number;
   parentStairName: string;
   landingCount: number;
@@ -166,11 +169,14 @@ export interface StairFlightAnalysis {
 
 export interface StairParentValidation {
   expressId: number;
+  globalId: string;
   name: string;
+  storeyName?: string;
   flightIds: number[];
   landingIds: number[];
   expectedRisers?: number;
   calculatedRisers?: number;
+  landingTransitionRisers?: number;
   expectedTreads?: number;
   calculatedTreads?: number;
   calculatedHorizontalStages?: number;
@@ -195,12 +201,15 @@ export interface StairRepairReport {
   flightsRepaired: number;
   fieldsWritten: number;
   propertyValuesWritten: number;
+  entitiesConverted: number;
+  conversions: Array<{ expressId: number; globalId: string; name: string; oldEntity: string; newEntity: string }>;
   changes: Array<{ expressId: number; name: string; field: StairFieldName; oldValue: string; newValue: number; source: StairValueSource }>;
   validation: ValidationResult;
 }
 
 export interface StairRepairResult {
   ifcText: string;
+  ifcBytes?: ArrayBuffer;
   outputFilename: string;
   report: StairRepairReport;
 }

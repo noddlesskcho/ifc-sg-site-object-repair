@@ -128,10 +128,20 @@ export function serializeRecord(record: StepRecord): string {
 }
 
 export function serializeStep(model: StepModel, deleted = new Set<number>()): string {
-  const lines = [...model.records.values()]
-    .sort((a, b) => a.id - b.id)
-    .filter((record) => !deleted.has(record.id))
-    .map(serializeRecord);
+  const records = [...model.records.values()];
+  let sorted = true;
+  for (let index = 1; index < records.length; index += 1) {
+    if (records[index - 1].id > records[index].id) {
+      sorted = false;
+      break;
+    }
+  }
+  if (!sorted) records.sort((a, b) => a.id - b.id);
+
+  const lines: string[] = [];
+  for (const record of records) {
+    if (!deleted.has(record.id)) lines.push(serializeRecord(record));
+  }
   return `${model.header}${lines.join("\n")}\n${model.footer.trimStart()}`;
 }
 

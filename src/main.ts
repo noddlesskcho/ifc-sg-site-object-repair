@@ -4,11 +4,12 @@ import { analyseStairFlights, repairStairFlights } from "./stair-engine";
 import type { IfcInspection, MatchResult, PropertyCheckResult, RepairCategory, RepairResult, RepairSelection, StairAnalysisResult, StairFieldAnalysis, StairFieldName, StairRepairResult, StatusKind } from "./types";
 import { IfcWorkerClient } from "./worker-client";
 import "./styles.css";
+import { LARGE_FILE_THRESHOLD_BYTES } from "./constants";
 
 const worker = typeof Worker !== "undefined" ? new IfcWorkerClient() : undefined;
 
 interface AppState {
-  mode: "site" | "stairs";
+  mode: "home" | "site" | "stairs";
   stage: number;
   status: StatusKind;
   message: string;
@@ -30,7 +31,7 @@ interface AppState {
 }
 
 let state: AppState = {
-  mode: "site",
+  mode: "home",
   stage: 0,
   status: "waiting",
   message: "Select an IFC4 STEP file to begin.",
@@ -60,28 +61,35 @@ function render() {
         <div class="header-graphic">${headerGraphic()}</div>
         <div class="topbar-text">
           <p class="eyebrow">IFC+SG Utility</p>
-          <h1>IFC Repair Utility</h1>
+          <h1>ArchiCAD IFC Repair Tool</h1>
           <p class="subtitle">Repair missing IFC+SG site information and native stair-flight attributes from Archicad models.</p>
         </div>
         <div class="status ${state.status}">${iconForStatus(state.status)}<span>${statusLabel(state.status)}</span></div>
       </header>
-      ${renderModeTabs()}
+      ${state.mode === "home" ? renderModeChooser() : renderModeTabs()}
       ${state.mode === "site" ? renderStepper() : ""}
-      ${state.mode === "site" && state.stage === 4 ? "" : renderNotice()}
-      ${state.mode === "site" ? renderStage() : renderStairWorkflow()}
+      ${state.mode === "home" || (state.mode === "site" && state.stage === 4) ? "" : renderNotice()}
+      ${state.mode === "home" ? "" : state.mode === "site" ? renderStage() : renderStairWorkflow()}
     </main>`;
   bindEvents();
 }
 
 function renderModeTabs() {
-  return `<nav class="mode-tabs" aria-label="Repair function">
-    <button class="mode-tab ${state.mode === "site" ? "active" : ""}" data-mode="site" aria-selected="${state.mode === "site"}">Fix Missing IFC Information</button>
-    <button class="mode-tab ${state.mode === "stairs" ? "active" : ""}" data-mode="stairs" aria-selected="${state.mode === "stairs"}">Fix Missing IfcStairFlight</button>
+  return `<nav class="mode-tabs selected-mode" aria-label="Repair function">
+    <strong>${state.mode === "site" ? "Fix Missing IFC Information" : "Fix Missing IfcStairFlight"}</strong>
+    <button class="ghost" data-mode="home">Change repair type</button>
   </nav>`;
 }
 
+function renderModeChooser() {
+  return `<section class="mode-chooser" aria-label="Choose a repair function">
+    <button class="mode-choice" data-mode="site"><strong>Fix Missing IFC Information</strong><span>Repair IFC+SG site coverage, site boundary and planting-area information.</span></button>
+    <button class="mode-choice" data-mode="stairs"><strong>Fix Missing IfcStairFlight</strong><span>Analyse and repair missing native ArchicAD stair-flight attributes.</span></button>
+  </section>`;
+}
+
 function renderNotice() {
-  const showProgress = state.status === "processing" && state.loadingProgress > 0 && (state.mode === "stairs" || state.stage !== 0);
+  const showProgress = (state.status === "reading" || state.status === "processing") && state.loadingProgress > 0;
   return `<section class="notice ${showProgress ? "with-progress" : ""} ${state.status === "error" || state.status === "validation-failed" ? "danger" : state.status === "warning" ? "warn" : ""}">
     ${iconForStatus(state.status)}
     <div class="notice-body">
@@ -140,7 +148,7 @@ function renderStage() {
 }
 
 function renderSelect() {
-  const warning = state.file && state.file.size > 100 * 1024 * 1024 ? `<p class="warning">This file is larger than 100 MB. You can continue, but processing may take longer.</p>` : "";
+  const warning = state.file && state.file.size > LARGE_FILE_THRESHOLD_BYTES ? `<p class="warning"><strong>Large-file mode:</strong> analysis uses IFC relationships and property data without loading a WebIFC geometry model. Processing may take longer, but memory-intensive duplicate file copies are disabled.</p>` : "";
   const loaded = Boolean(state.inspection);
   const loading = state.status === "reading" || (state.status === "processing" && state.loadingProgress > 0);
   return `
@@ -192,28 +200,30 @@ function renderStairEmpty() {
       <p>Checking flight properties, parent stair relationships, units and straight-flight geometry.</p>
     </div>`;
   }
-  return `<div class="stair-empty">
-    <h3>Stair analysis is ready to retry</h3>
-    <p>The analysis normally starts automatically when a file is opened. Retrying does not change any IFC values.</p>
-    <button data-action="analyse-stairs">${SearchIcon()} Analyse Again</button>
-  </div>`;
+  return `<div class="stair-empty"><h3>No stair analysis is available</h3><p>Choose another IFC4 file to start the analysis automatically.</p></div>`;
 }
 
 function renderStairAnalysis(analysis: StairAnalysisResult) {
   const repairable = analysis.flights.filter((flight) => flight.repairableFields.length > 0 && flight.status !== "Conflict");
+  const conflicts = analysis.flights.filter((flight) => flight.status === "Conflict");
+  const incomplete = analysis.flights.filter((flight) => ["Partial", "Manual Review", "Cannot Calculate"].includes(flight.status));
+  const hasDiagnostics = conflicts.length > 0 || incomplete.length > 0 || analysis.parents.some((parent) => parent.status === "Conflict" || parent.status === "Incomplete");
   return `<div class="stair-results">
     <div class="stair-scope-note">
       ${ShieldIcon()}
       <p><strong>Only information missing from both the stair flight and Pset_StairFlightCommon will be repaired.</strong> Existing native and property-set values are never overwritten. Orange values are proposed repairs; blue values already exist in the model.</p>
     </div>
     <div class="summary-grid stair-summary">
-      ${metric("Stair flights", String(analysis.flights.length))}
-      ${metric("Ready or partial", String(repairable.length))}
-      ${metric("Length unit", analysis.lengthUnit)}
-      ${metric("Parent stairs", String(analysis.parents.length))}
+      ${metric("Ready to repair", String(repairable.length))}
+      ${metric("Conflict", String(conflicts.length))}
+      ${metric("Incomplete", String(incomplete.length))}
+    </div>
+    <div class="actions stair-primary-actions">
+      ${hasDiagnostics ? `<button class="secondary" data-action="download-stair-log">${DownloadIcon()} Export Diagnostic Log</button>` : ""}
+      <button data-action="repair-stairs" ${repairable.length === 0 ? "disabled" : ""}>${WrenchIcon()} ${repairable.length === 0 ? "Nothing to Repair" : "Repair Missing IfcStairFlight Information"}</button>
     </div>
     ${analysis.flights.length === 0 ? `<p class="warning">No IfcStairFlight entities were found in this file.</p>` : `
-      <div class="table-wrap stair-table-wrap"><table class="stair-table">
+      <details class="stair-disclosure"><summary><span class="chevron">${ChevronIcon()}</span>Native fields and proposed repairs (${analysis.flights.length})</summary><div class="table-wrap stair-table-wrap"><table class="stair-table">
         <thead><tr><th>Stair</th><th>Stair flight</th><th>Risers</th><th>Riser height</th><th>Treads</th><th>Tread length</th><th>Source</th><th>Status</th></tr></thead>
         <tbody>${analysis.flights.map((flight) => `<tr>
           <td>${escapeHtml(flight.parentStairName)}</td>
@@ -225,12 +235,8 @@ function renderStairAnalysis(analysis: StairAnalysisResult) {
           <td>${escapeHtml([...new Set(Object.values(flight.fields).map((field) => sourceLabel(field.source)))].join(" + "))}</td>
           <td><span class="badge ${stairStatusClass(flight.status)}">${stairStatusLabel(flight.status)}</span></td>
         </tr>`).join("")}</tbody>
-      </table></div>`}
-    ${analysis.parents.length ? `<div class="parent-validations"><h3>Parent stair validation</h3>${analysis.parents.map((parent) => `<div class="parent-check ${parent.status.toLowerCase().replace(/\s+/g, "-")}"><strong>#${parent.expressId} ${escapeHtml(parent.name)}</strong><span class="badge ${parent.status === "Pass" ? "badge-success" : parent.status === "Conflict" ? "badge-danger" : "badge-neutral"}">${parent.status}</span><p>${escapeHtml(parent.message)} ${parent.landingIds.length} landing${parent.landingIds.length === 1 ? "" : "s"} found.</p></div>`).join("")}</div>` : ""}
-    <div class="actions">
-      <button class="ghost" data-action="analyse-stairs">${SearchIcon()} Analyse Again</button>
-      <button data-action="repair-stairs" ${repairable.length === 0 ? "disabled" : ""}>${WrenchIcon()} ${repairable.length === 0 ? "Nothing to Repair" : "Repair Missing IfcStairFlight Information"}</button>
-    </div>
+      </table></div></details>`}
+    ${analysis.parents.length ? `<details class="stair-disclosure parent-validations"><summary><span class="chevron">${ChevronIcon()}</span>Parent stair validation (${analysis.parents.length})</summary><div class="parent-validation-scroll">${analysis.parents.map((parent) => `<div class="parent-check ${parent.status.toLowerCase().replace(/\s+/g, "-")}"><strong>#${parent.expressId} ${escapeHtml(parent.name)}</strong><span class="badge ${parent.status === "Pass" ? "badge-success" : parent.status === "Conflict" ? "badge-danger" : "badge-neutral"}">${parent.status}</span><p>${escapeHtml(parent.message)} ${parent.landingIds.length} landing${parent.landingIds.length === 1 ? "" : "s"} found.</p></div>`).join("")}</div></details>` : ""}
   </div>`;
 }
 
@@ -252,7 +258,7 @@ function renderStairRepairResult(result: StairRepairResult) {
   const passed = result.report.validation.passed;
   return `<div class="stair-download ${passed ? "passed" : "failed"}">
     <strong>${passed ? "Repair completed and validated" : "Post-repair validation failed"}</strong>
-    <p>${result.report.fieldsWritten} resolved field${result.report.fieldsWritten === 1 ? "" : "s"} written to native attributes and ${result.report.propertyValuesWritten} missing Pset value${result.report.propertyValuesWritten === 1 ? "" : "s"} across ${result.report.flightsRepaired} flight${result.report.flightsRepaired === 1 ? "" : "s"}.</p>
+    <p>${result.report.fieldsWritten} resolved field${result.report.fieldsWritten === 1 ? "" : "s"} written to native attributes and ${result.report.propertyValuesWritten} missing Pset value${result.report.propertyValuesWritten === 1 ? "" : "s"} across ${result.report.flightsRepaired} flight${result.report.flightsRepaired === 1 ? "" : "s"}. ${result.report.entitiesConverted} proxy element${result.report.entitiesConverted === 1 ? "" : "s"} converted.</p>
     ${passed ? "" : errorList(result.report.validation.blockingErrors)}
     <div class="actions"><button class="secondary" data-action="download-stair-json">${FileJsonIcon()} Download JSON report</button><button data-action="download-stair-ifc" ${passed ? "" : "disabled"}>${DownloadIcon()} Download repaired IFC</button></div>
   </div>`;
@@ -503,7 +509,7 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) =>
     button.addEventListener("click", async () => {
       const mode = button.dataset.mode as AppState["mode"];
-      setState({ mode, status: "waiting", message: mode === "site" ? "IFC+SG site-object repair is ready." : state.inspection ? "Analyse the loaded file for missing stair-flight information." : "Select an IFC4 STEP file to begin." });
+      setState({ mode, status: "waiting", message: mode === "site" ? "IFC+SG site-object repair is ready." : mode === "stairs" && state.inspection ? "Analysing the loaded file for missing stair-flight information." : "Select an IFC4 STEP file to begin." });
       if (mode === "stairs" && state.inspection?.schema.toUpperCase() === "IFC4" && state.sourceText && !state.stairAnalysis) {
         await runStairAnalysis();
       }
@@ -646,24 +652,28 @@ async function handleAction(action: string, category?: RepairCategory) {
   }
   if (action === "to-review") setState({ stage: 3, status: "waiting", message: "Review the entity and relationship changes before repair." });
   if (action === "repair") await runRepair();
-  if (action === "download-ifc" && state.repair) downloadText(state.repair.ifcText, state.repair.outputFilename, "application/x-step");
+  if (action === "download-ifc" && state.repair) downloadText(state.repair.ifcBytes ?? state.repair.ifcText, state.repair.outputFilename, "application/x-step");
   if (action === "download-json" && state.repair) downloadText(JSON.stringify(state.repair.report, null, 2), state.repair.outputFilename.replace(/\.ifc$/i, ".json"), "application/json");
   if (action === "analyse-stairs") await runStairAnalysis();
   if (action === "repair-stairs") await runStairRepair();
-  if (action === "download-stair-ifc" && state.stairRepair) downloadText(state.stairRepair.ifcText, state.stairRepair.outputFilename, "application/x-step");
+  if (action === "download-stair-ifc" && state.stairRepair) downloadText(state.stairRepair.ifcBytes ?? state.stairRepair.ifcText, state.stairRepair.outputFilename, "application/x-step");
   if (action === "download-stair-json" && state.stairRepair) downloadText(JSON.stringify(state.stairRepair.report, null, 2), state.stairRepair.outputFilename.replace(/\.ifc$/i, ".json"), "application/json");
+  if (action === "download-stair-log" && state.stairAnalysis) downloadText(buildStairDiagnosticLog(state.stairAnalysis), state.stairAnalysis.filename.replace(/\.ifc$/i, "") + "_stair_diagnostic.txt", "text/plain");
 }
 
 async function runStairAnalysis() {
   if (!state.inspection || !state.sourceText) return;
   setState({ status: "processing", message: "Analysing stair relationships, properties, units and geometry...", loadingProgress: 18, stairRepair: undefined });
+  startRepairProgress();
   try {
     const analysis = worker
       ? await worker.analyseStairs(state.sourceText, state.inspection.filename)
       : analyseStairFlights(state.sourceText, state.inspection.filename);
     const repairable = analysis.flights.filter((flight) => flight.repairableFields.length > 0 && flight.status !== "Conflict").length;
-    setState({ stairAnalysis: analysis, status: analysis.flights.length ? "waiting" : "warning", loadingProgress: 100, message: analysis.flights.length ? `Analysed ${analysis.flights.length} stair flights; ${repairable} can be repaired automatically.` : "No IfcStairFlight entities were found." });
+    stopRepairProgress();
+    setState({ stairAnalysis: analysis, status: analysis.flights.length ? "waiting" : "warning", loadingProgress: 100, message: analysis.flights.length ? `Analysed ${analysis.flights.length} stair flights or convertible stair components; ${repairable} can be repaired automatically.` : "No repairable stair-flight components were found." });
   } catch (error) {
+    stopRepairProgress();
     setState({ status: "error", loadingProgress: 0, message: error instanceof Error ? error.message : String(error) });
   }
 }
@@ -671,14 +681,34 @@ async function runStairAnalysis() {
 async function runStairRepair() {
   if (!state.inspection || !state.stairAnalysis) return;
   setState({ status: "processing", loadingProgress: 25, message: "Writing missing stair-flight attributes and validating the repaired IFC..." });
+  startRepairProgress();
   try {
     const repaired = worker
       ? await worker.repairStairs(state.sourceText, state.inspection.filename, state.stairAnalysis)
       : repairStairFlights(state.sourceText, state.inspection.filename, state.stairAnalysis);
-    setState({ stairRepair: repaired, loadingProgress: 100, status: repaired.report.validation.passed ? "validation-passed" : "validation-failed", message: repaired.report.validation.passed ? `Repair complete. ${repaired.report.fieldsWritten} values were written to native attributes and Pset_StairFlightCommon, then re-validated.` : "Repair finished, but post-repair validation found blocking errors." });
+    stopRepairProgress();
+    if (repaired.report.validation.passed) downloadText(repaired.ifcBytes ?? repaired.ifcText, repaired.outputFilename, "application/x-step");
+    setState({ stairRepair: repaired, loadingProgress: 100, status: repaired.report.validation.passed ? "validation-passed" : "validation-failed", message: repaired.report.validation.passed ? `Repair complete. ${repaired.report.fieldsWritten} values were written and the validated IFC was downloaded automatically.` : "Repair finished, but post-repair validation found blocking errors." });
   } catch (error) {
+    stopRepairProgress();
     setState({ status: "error", loadingProgress: 0, message: error instanceof Error ? error.message : String(error) });
   }
+}
+
+function buildStairDiagnosticLog(analysis: StairAnalysisResult) {
+  const lines = [
+    "ArchiCAD IFC Repair Tool - Stair Diagnostic Log",
+    `File: ${analysis.filename}`,
+    `Analysed: ${analysis.analysedAt}`,
+    ""
+  ];
+  for (const parent of analysis.parents.filter((item) => item.status === "Conflict" || item.status === "Incomplete")) {
+    lines.push(`PARENT #${parent.expressId}`, `Element: ${parent.name}`, `GUID: ${parent.globalId || "Unknown"}`, `Level: ${parent.storeyName || "Unknown"}`, `Status: ${parent.status}`, `Reason: ${parent.message}`, "");
+  }
+  for (const flight of analysis.flights.filter((item) => item.status === "Conflict" || ["Partial", "Manual Review", "Cannot Calculate"].includes(item.status))) {
+    lines.push(`ELEMENT #${flight.expressId}`, `Element: ${flight.name}`, `GUID: ${flight.globalId || "Unknown"}`, `Level: ${flight.storeyName || "Unknown"}`, `Status: ${flight.status}`, `Reason: ${flight.evidence.join(" ") || "Required values could not be resolved."}`, "");
+  }
+  return lines.join("\r\n");
 }
 
 async function runMatch() {
@@ -1012,8 +1042,8 @@ function canVisit(index: number) {
   return Boolean(state.repair);
 }
 
-function downloadText(text: string, filename: string, type: string) {
-  const blob = new Blob([text], { type });
+function downloadText(content: string | ArrayBuffer, filename: string, type: string) {
+  const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
