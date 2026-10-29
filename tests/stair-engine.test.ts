@@ -90,7 +90,7 @@ describe("IfcStairFlight analysis", () => {
 
   it("repairs only missing native attributes and preserves every unrelated stair-flight argument", () => {
     const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
-    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis, false, true);
+    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis);
     expect(repaired.ifcText).toContain("#31= IFCSTAIRFLIGHT('FLIGHT',#2,'SS - 057',$,$,#10,#20,'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.);");
     expect(repaired.outputFilename).toBe("Stairs_repaired.ifc");
     expect(repaired.report.fieldsWritten).toBe(4);
@@ -103,7 +103,7 @@ describe("IfcStairFlight analysis", () => {
 
   it("validates large-file repairs without reparsing duplicate full-file models", () => {
     const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
-    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis, true, true);
+    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis, true);
     expect(repaired.report.validation.passed).toBe(true);
     expect(repaired.report.validation.checks[0]).toContain("without creating duplicate full-file parse trees");
     expect(repaired.ifcText).toContain("'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.");
@@ -115,7 +115,7 @@ describe("IfcStairFlight analysis", () => {
     expect(analysis.flights[0].fields.numberOfRisers.value).toBe(7);
     expect(analysis.flights[0].fields.numberOfRisers.conflict).toBeTruthy();
     expect(analysis.flights[0].status).toBe("Conflict");
-    const repaired = repairStairFlights(withExisting, "Stairs.ifc", analysis, false, true);
+    const repaired = repairStairFlights(withExisting, "Stairs.ifc", analysis);
     expect(repaired.ifcText).toContain("'FLIGHT-TAG',7,");
     expect(repaired.report.fieldsWritten).toBe(0);
     expect(repaired.report.propertyValuesWritten).toBe(0);
@@ -164,7 +164,7 @@ describe("IfcStairFlight analysis", () => {
     expect(flight.status).toBe("Already Complete");
     expect(flight.repairableFields).toEqual([]);
 
-    const repaired = repairStairFlights(withFlightPropertySet, "FlightPset.ifc", analysis, false, true);
+    const repaired = repairStairFlights(withFlightPropertySet, "FlightPset.ifc", analysis);
     expect(repaired.ifcText).toContain("'FLIGHT-TAG',$,$,$,$,.NOTDEFINED.");
     expect(repaired.report.fieldsWritten).toBe(0);
     expect(repaired.report.propertyValuesWritten).toBe(0);
@@ -178,7 +178,7 @@ describe("IfcStairFlight analysis", () => {
     expect(analysis.flights[0].status).toBe("Already Complete");
     expect(analysis.flights[0].repairableFields).toEqual([]);
 
-    const repaired = repairStairFlights(complete, "Complete.ifc", analysis, false, true);
+    const repaired = repairStairFlights(complete, "Complete.ifc", analysis);
     expect(repaired.report.fieldsWritten).toBe(0);
     expect(repaired.ifcText).toContain("'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.");
     expect(repaired.ifcText).toContain("#56= IFCPROPERTYSINGLEVALUE('NumberOfRiser',$,IFCCOUNTMEASURE(6.),$);");
@@ -187,7 +187,7 @@ describe("IfcStairFlight analysis", () => {
   it("repairs only information absent from both native attributes and the flight property set", () => {
     const partial = stairIfc.replace("'FLIGHT-TAG',$,$,$,$,.NOTDEFINED.", "'FLIGHT-TAG',6,$,$,$,.NOTDEFINED.");
     const analysis = analyseStairFlights(partial, "Partial.ifc", [geometry]);
-    const repaired = repairStairFlights(partial, "Partial.ifc", analysis, false, true);
+    const repaired = repairStairFlights(partial, "Partial.ifc", analysis);
     expect(repaired.report.fieldsWritten).toBe(3);
     expect(repaired.report.propertyValuesWritten).toBe(3);
     expect(repaired.ifcText).toContain("'FLIGHT-TAG',6,5,175.,275.,.NOTDEFINED.");
@@ -203,7 +203,7 @@ ENDSEC;
 END-ISO-10303-21;`
     );
     const analysis = analyseStairFlights(statusOnly, "StatusOnly.ifc", [geometry]);
-    const repaired = repairStairFlights(statusOnly, "StatusOnly.ifc", analysis, false, true);
+    const repaired = repairStairFlights(statusOnly, "StatusOnly.ifc", analysis);
     expect(repaired.report.fieldsWritten).toBe(4);
     expect(repaired.report.propertyValuesWritten).toBe(4);
     expect(repaired.ifcText).toContain("IFCPROPERTYSINGLEVALUE('Status',$,IFCLABEL('EXISTING'),$)");
@@ -283,7 +283,7 @@ describe("IfcStair parent rules", () => {
     expect(analysis.flights[0].status).toBe("Blocked");
     expect(analysis.flights[0].repairableFields).toEqual([]);
     expect(flightHasRepairWork(analysis.flights[0])).toBe(false);
-    expect(() => repairStairFlights(noStair, "NoStair.ifc", analysis, false, true)).toThrow(/No IfcStair was found/);
+    expect(() => repairStairFlights(noStair, "NoStair.ifc", analysis)).toThrow(/No IfcStair was found/);
   });
 
   it("reports an IfcStairFlight used as a parent stair and leaves that stair unrepaired", () => {
@@ -310,16 +310,12 @@ END-ISO-10303-21;`
     expect(repaired.report.validation.passed).toBe(true);
   });
 
-  it("lists missing parent values and requires confirmation before repair", () => {
+  it("repairs without asking about parent stair values that are not set", () => {
     const analysis = analyseStairFlights(stairIfc, "Stairs.ifc", [geometry]);
-    expect(analysis.missingParentProperties).toEqual([
-      expect.objectContaining({ expressId: 30, missing: ["Status", "ConstructionMethod", "MaterialGrade", "AmendmentStatus"] })
-    ]);
-    expect(stairRepairPreconditionError(analysis, false)).toContain("Confirm they are intentionally left out");
-    expect(stairRepairPreconditionError(analysis, true)).toBeUndefined();
-    expect(() => repairStairFlights(stairIfc, "Stairs.ifc", analysis)).toThrow(/intentionally left out/);
-    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis, false, true);
-    expect(repaired.report.confirmedOmissions[0].missing).toContain("AmendmentStatus");
+    expect(stairRepairPreconditionError(analysis)).toBeUndefined();
+    const repaired = repairStairFlights(stairIfc, "Stairs.ifc", analysis);
+    expect(repaired.report.validation.passed).toBe(true);
+    expect(repaired.report.inheritedPropertiesWritten).toBe(0);
   });
 
   it("leaves riser height and tread length empty when the parent stair does not set them", () => {
@@ -330,12 +326,10 @@ END-ISO-10303-21;`
     expect(flight.fields.treadLength.value).toBeUndefined();
     expect(flight.fields.numberOfRisers.value).toBe(6);
     expect(flight.repairableFields).toEqual(["numberOfRisers", "numberOfTreads"]);
-    expect(analysis.missingParentProperties[0].missing).toEqual(["RiserHeight", "TreadLength"]);
   });
 
   it("copies Status, ConstructionMethod, MaterialGrade and AmendmentStatus from the parent IfcStair", () => {
     const analysis = analyseStairFlights(withParentProperties, "Inherit.ifc", [geometry]);
-    expect(analysis.missingParentProperties).toEqual([]);
     const inherited = Object.fromEntries(analysis.flights[0].inheritedProperties.map((property) => [property.name, property]));
     expect(inherited.ConstructionMethod.action).toBe("Inherit");
     expect(inherited.ConstructionMethod.propertySet).toBe("SGPset_StairFlight");

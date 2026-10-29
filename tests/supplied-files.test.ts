@@ -82,7 +82,7 @@ describe.skipIf(!existsSync(stairPath))("supplied stair IFC file", () => {
       [234, 2, 1]
     ]);
     expect(analysis.parents[0].status).toBe("Pass");
-    const repaired = repairStairFlights(source, "stairs_for checking.ifc", analysis, false, true);
+    const repaired = repairStairFlights(source, "stairs_for checking.ifc", analysis);
 
     expect(repaired.report.validation.passed).toBe(true);
     expect(repaired.report.fieldsWritten).toBe(16);
@@ -103,7 +103,7 @@ describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", ()
   it("analyses and repairs without exceeding the JavaScript argument limit", () => {
     const source = readFileSync(largeStairPath, "utf8");
     const analysis = analyseStairFlights(source, "BLOCK 41.ifc");
-    const repaired = repairStairFlights(source, "BLOCK 41.ifc", analysis, false, true);
+    const repaired = repairStairFlights(source, "BLOCK 41.ifc", analysis);
 
     expect(analysis.flights.length).toBeGreaterThan(0);
     expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
@@ -155,7 +155,7 @@ describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () 
     }
     expect(analysis.flights.filter((flight) => [486904, 486941, 487155].includes(flight.parentStairId ?? -1)).map((flight) => [flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([[5, 6], [5, 6], [11, 12]]);
 
-    const repaired = repairStairFlights(source, "S2531_AR_PODIUM.ifc", analysis, false, true);
+    const repaired = repairStairFlights(source, "S2531_AR_PODIUM.ifc", analysis);
     expect(repaired.report.validation.passed).toBe(true);
     expect(repaired.report.entitiesConverted).toBeGreaterThanOrEqual(3);
     for (const proxyId of [373869, 375972, 398052]) expect(repaired.ifcText).toContain(`#${proxyId}= IFCSTAIRFLIGHT`);
@@ -191,7 +191,7 @@ describe.skipIf(!existsSync(linkPodiumStairPath))("link podium stairs exported w
     expect(analysis.blockers[1].elements).toHaveLength(33);
     expect(analysis.flights).toHaveLength(76);
     expect(analysis.flights.every((flight) => flight.status === "Blocked")).toBe(true);
-    expect(() => repairStairFlights(source, "S2527_AR_ LINK PODIUM.ifc", analysis, false, true)).toThrow(/No IfcStair was found/);
+    expect(() => repairStairFlights(source, "S2527_AR_ LINK PODIUM.ifc", analysis)).toThrow(/No IfcStair was found/);
   }, 60_000);
 
   it("counts 7 risers and 6 treads per flight around the ST5B landing once the parent is an IfcStair", () => {

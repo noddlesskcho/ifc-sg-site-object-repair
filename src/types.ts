@@ -144,9 +144,6 @@ export interface StairBlocker {
 /** Text properties a child IfcStairFlight takes over from its parent IfcStair. */
 export type StairInheritedPropertyName = "Status" | "ConstructionMethod" | "MaterialGrade" | "AmendmentStatus";
 
-/** Every parent IfcStair value the flights rely on; missing ones need user confirmation before repair. */
-export type StairParentPropertyName = "RiserHeight" | "TreadLength" | StairInheritedPropertyName;
-
 export interface StairInheritedProperty {
   name: StairInheritedPropertyName;
   propertySet: string;
@@ -155,14 +152,6 @@ export interface StairInheritedProperty {
   existingValue?: string;
   existingPropertyId?: number;
   action: "Inherit" | "Already Matches" | "Kept (differs from parent)" | "Parent Missing";
-}
-
-export interface StairMissingParentProperties {
-  expressId: number;
-  globalId: string;
-  name: string;
-  storeyName?: string;
-  missing: StairParentPropertyName[];
 }
 
 export interface StairGeometryEvidence {
@@ -228,7 +217,6 @@ export interface StairAnalysisResult {
   blockers: StairBlocker[];
   /** True when no IfcStair exists, so nothing in the file may be repaired. */
   repairBlocked: boolean;
-  missingParentProperties: StairMissingParentProperties[];
   analysedAt: string;
 }
 
@@ -245,7 +233,6 @@ export interface StairRepairReport {
   inheritedPropertiesWritten: number;
   propertyChanges: Array<{ expressId: number; name: string; propertySet: string; property: StairInheritedPropertyName; oldValue: string; newValue: string; parentStairId: number }>;
   blockers: StairBlocker[];
-  confirmedOmissions: StairMissingParentProperties[];
   validation: ValidationResult;
 }
 
