@@ -268,11 +268,47 @@ function renderStairBlockers(analysis: StairAnalysisResult) {
 }
 
 function renderMissingParentProperties(analysis: StairAnalysisResult) {
+  const count = analysis.missingParentProperties.length;
   return `<div class="confirm">
-    <p><strong>Some parent IfcStair values were not found.</strong> These values are not all mandatory. Child flights will not receive them. Confirm that each one is intentionally left out before repair.</p>
-    <ul>${analysis.missingParentProperties.map((parent) => `<li>#${parent.expressId} ${escapeHtml(parent.name)}${parent.storeyName ? ` (${escapeHtml(parent.storeyName)})` : ""}: ${parent.missing.join(", ")}</li>`).join("")}</ul>
-    <label><input type="checkbox" id="confirmStairOmissions" ${state.stairOmissionsConfirmed ? "checked" : ""} /> I confirm that these parent stair values are intentionally left out.</label>
+    <p><strong>${count} IfcStair ${count === 1 ? "has" : "have"} empty values.</strong> Their child IfcStairFlight will be left empty for the same values.</p>
+    ${groupMissingParentProperties(analysis).map((group) => `<div class="missing-group">
+      <p><strong>Empty:</strong> ${group.missing.join(", ")}</p>
+      <ul>${group.parents.map((parent) => `<li>${escapeHtml(parent.name)} <span class="muted">#${parent.expressId}${parent.storeyName ? ` | Level ${escapeHtml(parent.storeyName)}` : ""}</span></li>`).join("")}</ul>
+    </div>`).join("")}
+    <div class="confirm-actions">
+      <label><input type="checkbox" id="confirmStairOmissions" ${state.stairOmissionsConfirmed ? "checked" : ""} /> These values are intentionally left empty.</label>
+      <button class="secondary" data-action="download-stair-missing">${DownloadIcon()} Download list (.txt)</button>
+    </div>
   </div>`;
+}
+
+function groupMissingParentProperties(analysis: StairAnalysisResult) {
+  const groups = new Map<string, { missing: string[]; parents: StairAnalysisResult["missingParentProperties"] }>();
+  const parents = [...analysis.missingParentProperties].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }) || a.expressId - b.expressId);
+  for (const parent of parents) {
+    const key = parent.missing.join(", ");
+    if (!groups.has(key)) groups.set(key, { missing: parent.missing, parents: [] });
+    groups.get(key)!.parents.push(parent);
+  }
+  return [...groups.values()];
+}
+
+function buildMissingParentPropertiesText(analysis: StairAnalysisResult) {
+  const lines = [
+    "IFC+SG Stair Repair - Empty IfcStair Values",
+    `File: ${analysis.filename}`,
+    `Analysed: ${analysis.analysedAt}`,
+    "",
+    `${analysis.missingParentProperties.length} IfcStair have empty values.`,
+    "Their child IfcStairFlight will be left empty for the same values.",
+    ""
+  ];
+  for (const group of groupMissingParentProperties(analysis)) {
+    lines.push(`Empty: ${group.missing.join(", ")}`);
+    for (const parent of group.parents) lines.push(`  ${parent.name} | #${parent.expressId} | Level: ${parent.storeyName || "Unknown"} | GUID: ${parent.globalId || "Unknown"}`);
+    lines.push("");
+  }
+  return lines.join("\r\n");
 }
 
 function inheritedPropertySummary(property: StairAnalysisResult["flights"][number]["inheritedProperties"][number]) {
@@ -696,6 +732,7 @@ async function handleAction(action: string, category?: RepairCategory) {
   if (action === "repair-stairs") await runStairRepair();
   if (action === "download-stair-ifc" && state.stairRepair) downloadText(state.stairRepair.ifcBytes ?? state.stairRepair.ifcText, state.stairRepair.outputFilename, "application/x-step");
   if (action === "download-stair-json" && state.stairRepair) downloadText(JSON.stringify(state.stairRepair.report, null, 2), state.stairRepair.outputFilename.replace(/\.ifc$/i, ".json"), "application/json");
+  if (action === "download-stair-missing" && state.stairAnalysis) downloadText(buildMissingParentPropertiesText(state.stairAnalysis), state.stairAnalysis.filename.replace(/\.ifc$/i, "") + "_empty_stair_values.txt", "text/plain");
   if (action === "download-stair-log" && state.stairAnalysis) downloadText(buildStairDiagnosticLog(state.stairAnalysis), state.stairAnalysis.filename.replace(/\.ifc$/i, "") + "_stair_diagnostic.txt", "text/plain");
 }
 
