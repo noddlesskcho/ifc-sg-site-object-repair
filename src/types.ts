@@ -131,7 +131,39 @@ export type StairValueSource =
   | "DERIVED"
   | "UNRESOLVED";
 export type StairConfidence = "High" | "Medium" | "None";
-export type StairAnalysisStatus = "Already Complete" | "Ready to Repair" | "Partial" | "Conflict" | "Manual Review" | "Cannot Calculate";
+export type StairAnalysisStatus = "Already Complete" | "Ready to Repair" | "Partial" | "Conflict" | "Manual Review" | "Cannot Calculate" | "Blocked";
+
+export type StairBlockerCode = "NO_IFCSTAIR" | "STAIRFLIGHT_AS_PARENT" | "UNASSIGNED_FLIGHT";
+
+export interface StairBlocker {
+  code: StairBlockerCode;
+  message: string;
+  elements: Array<{ expressId: number; globalId: string; name: string; storeyName?: string }>;
+}
+
+/** Text properties a child IfcStairFlight takes over from its parent IfcStair. */
+export type StairInheritedPropertyName = "Status" | "ConstructionMethod" | "MaterialGrade" | "AmendmentStatus";
+
+/** Every parent IfcStair value the flights rely on; missing ones need user confirmation before repair. */
+export type StairParentPropertyName = "RiserHeight" | "TreadLength" | StairInheritedPropertyName;
+
+export interface StairInheritedProperty {
+  name: StairInheritedPropertyName;
+  propertySet: string;
+  parentValue?: string;
+  parentPropertyId?: number;
+  existingValue?: string;
+  existingPropertyId?: number;
+  action: "Inherit" | "Already Matches" | "Kept (differs from parent)" | "Parent Missing";
+}
+
+export interface StairMissingParentProperties {
+  expressId: number;
+  globalId: string;
+  name: string;
+  storeyName?: string;
+  missing: StairParentPropertyName[];
+}
 
 export interface StairGeometryEvidence {
   expressId: number;
@@ -165,6 +197,7 @@ export interface StairFlightAnalysis {
   status: StairAnalysisStatus;
   evidence: string[];
   repairableFields: StairFieldName[];
+  inheritedProperties: StairInheritedProperty[];
 }
 
 export interface StairParentValidation {
@@ -191,6 +224,11 @@ export interface StairAnalysisResult {
   unitScaleToMetres: number;
   flights: StairFlightAnalysis[];
   parents: StairParentValidation[];
+  /** Whole-file or per-stair conditions that stop automatic repair; reported, never fixed. */
+  blockers: StairBlocker[];
+  /** True when no IfcStair exists, so nothing in the file may be repaired. */
+  repairBlocked: boolean;
+  missingParentProperties: StairMissingParentProperties[];
   analysedAt: string;
 }
 
@@ -204,6 +242,10 @@ export interface StairRepairReport {
   entitiesConverted: number;
   conversions: Array<{ expressId: number; globalId: string; name: string; oldEntity: string; newEntity: string }>;
   changes: Array<{ expressId: number; name: string; field: StairFieldName; oldValue: string; newValue: number; source: StairValueSource }>;
+  inheritedPropertiesWritten: number;
+  propertyChanges: Array<{ expressId: number; name: string; propertySet: string; property: StairInheritedPropertyName; oldValue: string; newValue: string; parentStairId: number }>;
+  blockers: StairBlocker[];
+  confirmedOmissions: StairMissingParentProperties[];
   validation: ValidationResult;
 }
 

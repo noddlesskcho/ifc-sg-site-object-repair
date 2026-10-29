@@ -1017,6 +1017,22 @@ td.mono {
   color: var(--warning-text);
 }
 
+.stair-blocker {
+  margin-top: 16px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-panel);
+  padding: 16px;
+  background: var(--danger-background, transparent);
+}
+
+.stair-blocker ul,
+.confirm ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  max-height: 220px;
+  overflow: auto;
+}
+
 .error-list {
   margin-top: 16px;
   border: 1px solid var(--danger-border);
