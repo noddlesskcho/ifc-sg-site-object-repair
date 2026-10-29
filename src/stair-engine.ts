@@ -2,16 +2,34 @@ import { makeIfcGuid } from "./ifc-engine";
 import { formatRefList, nextStepId, parseEnum, parseRef, parseRefList, parseStep, parseTypedValue, quoteStep, serializeStep, splitStepArgs, unquoteStep } from "./step-parser";
 import type {
   StairAnalysisResult,
+  StairBlocker,
   StairConfidence,
   StairFieldAnalysis,
   StairFieldName,
   StairFlightAnalysis,
   StairGeometryEvidence,
+  StairInheritedProperty,
+  StairInheritedPropertyName,
+  StairMissingParentProperties,
+  StairParentPropertyName,
   StairParentValidation,
   StairRepairResult,
   StairValueSource,
   ValidationResult
 } from "./types";
+
+type StepModel = ReturnType<typeof parseStep>;
+type StepRecord = StepModel["records"] extends Map<number, infer T> ? T : never;
+
+const INHERITED_PROPERTIES: Array<{ name: StairInheritedPropertyName; defaultPropertySet: string }> = [
+  { name: "Status", defaultPropertySet: "Pset_StairFlightCommon" },
+  { name: "ConstructionMethod", defaultPropertySet: "SGPset_StairFlight" },
+  { name: "MaterialGrade", defaultPropertySet: "SGPset_StairFlight" },
+  { name: "AmendmentStatus", defaultPropertySet: "SGPset_StairFlight" }
+];
+
+// Archicad writes "-" when a classification property is left empty; it carries no value to keep.
+const PLACEHOLDER_TEXT_VALUES = new Set(["", "-", "--"]);
 
 const FIELD_ARGS: Record<StairFieldName, number> = {
   numberOfRisers: 8,
@@ -71,7 +89,12 @@ export function analyseStairFlights(
 
   const flights: StairFlightAnalysis[] = [];
   const candidateIds = new Set<number>();
-  for (const record of model.records.values()) if (record.entity === "IFCSTAIRFLIGHT") candidateIds.add(record.id);
+  let stairCount = 0;
+  for (const record of model.records.values()) {
+    if (record.entity === "IFCSTAIRFLIGHT") candidateIds.add(record.id);
+    if (record.entity === "IFCSTAIR") stairCount += 1;
+  }
+  const flightParents = buildStairFlightParentLinks(model);
   for (const [parentId, children] of parentLinks.parentToChildren) {
     if (children.some((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT")) continue;
     const proxies = children.filter((id) => model.records.get(id)?.entity === "IFCBUILDINGELEMENTPROXY");
@@ -91,7 +114,54 @@ export function analyseStairFlights(
     const flightPsetValues = record.entity === "IFCSTAIRFLIGHT" ? readStairFlightProperties(psets.get(record.id) ?? [], model) : {};
     const flight = analyseFlight(record, parent, siblingFlightCount, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model);
     flight.storeyName = storeys.get(record.id) ?? (parentId ? storeys.get(parentId) : undefined);
+    if (parentId !== undefined) flight.inheritedProperties = analyseInheritedProperties(record.id, parentId, psets, model);
     flights.push(flight);
+  }
+
+  const blockers: StairBlocker[] = [];
+  const blockFlight = (flight: StairFlightAnalysis, reason: string) => {
+    flight.status = "Blocked";
+    flight.repairableFields = [];
+    flight.inheritedProperties = [];
+    flight.evidence.push(reason);
+  };
+  const describe = (id: number) => {
+    const record = model.records.get(id);
+    return { expressId: id, globalId: unquoteStep(record?.args[0] ?? ""), name: unquoteStep(record?.args[2] ?? "") || `#${id}`, storeyName: storeys.get(id) };
+  };
+  if (stairCount === 0) {
+    blockers.push({
+      code: "NO_IFCSTAIR",
+      message: `No IfcStair was found in this file (${candidateIds.size} IfcStairFlight found). Riser height, tread length and stair properties must follow a parent IfcStair, so automatic repair is blocked. Re-export the stairs as IfcStair aggregating their flights and landings.`,
+      elements: []
+    });
+  }
+  if (flightParents.parentToChildren.size > 0) {
+    const count = flightParents.parentToChildren.size;
+    blockers.push({
+      code: "STAIRFLIGHT_AS_PARENT",
+      message: `${count} IfcStairFlight object${count === 1 ? " acts" : "s act"} as a parent stair through IfcRelAggregates. The parent should be an IfcStair; these stairs and their child flights are reported only and are not repaired.`,
+      elements: [...flightParents.parentToChildren.keys()].map(describe)
+    });
+  }
+  const unassigned: number[] = [];
+  for (const flight of flights) {
+    const asParent = flightParents.parentToChildren.has(flight.expressId);
+    const flightParentId = flightParents.childToParent.get(flight.expressId);
+    if (asParent) blockFlight(flight, "This IfcStairFlight aggregates other stair elements and is acting as a parent stair; it should be an IfcStair. Not repaired.");
+    else if (flightParentId !== undefined) blockFlight(flight, `Parent #${flightParentId} is an IfcStairFlight, not an IfcStair. Not repaired.`);
+    else if (stairCount === 0) blockFlight(flight, "No IfcStair exists in this file. Not repaired.");
+    else if (flight.parentStairId === undefined) {
+      unassigned.push(flight.expressId);
+      blockFlight(flight, "Flight is not aggregated under an IfcStair, so it has no parent values to follow. Not repaired.");
+    }
+  }
+  if (unassigned.length) {
+    blockers.push({
+      code: "UNASSIGNED_FLIGHT",
+      message: `${unassigned.length} IfcStairFlight object${unassigned.length === 1 ? " is" : "s are"} not aggregated under any IfcStair and will not be repaired.`,
+      elements: unassigned.map(describe)
+    });
   }
 
   const landingTransitionCache = new Map<string, number>();
@@ -107,6 +177,7 @@ export function analyseStairFlights(
     flight.repairableFields = [];
     flight.evidence.push(`Parent stair #${parentConflict.expressId} count validation conflicts with its child totals; automatic repair is blocked.`);
   }
+  const missingParentProperties = findMissingParentProperties(parentLinks, flights, psets, model, storeys);
   return {
     filename,
     schema,
@@ -114,13 +185,39 @@ export function analyseStairFlights(
     unitScaleToMetres: unit.scaleToMetres,
     flights,
     parents,
+    blockers,
+    repairBlocked: stairCount === 0,
+    missingParentProperties,
     analysedAt: new Date().toISOString()
   };
 }
 
-export function repairStairFlights(text: string, filename: string, analysis: StairAnalysisResult, largeFileMode = false): StairRepairResult {
+/** Repair is refused until the user confirms that every missing parent stair value is meant to be left out. */
+export function stairRepairPreconditionError(analysis: StairAnalysisResult, omissionsConfirmed: boolean): string | undefined {
+  if (analysis.repairBlocked) return analysis.blockers.find((blocker) => blocker.code === "NO_IFCSTAIR")?.message ?? "No IfcStair was found; automatic repair is blocked.";
+  if (analysis.missingParentProperties.length && !omissionsConfirmed) {
+    return `Parent stair values are missing (${analysis.missingParentProperties.map((parent) => `${parent.name}: ${parent.missing.join(", ")}`).join("; ")}). Confirm they are intentionally left out before repair.`;
+  }
+  return undefined;
+}
+
+export function flightHasRepairWork(flight: StairFlightAnalysis): boolean {
+  if (flight.status === "Blocked" || flight.status === "Conflict") return false;
+  return flight.repairableFields.length > 0 || flight.inheritedProperties.some((property) => property.action === "Inherit");
+}
+
+export function repairStairFlights(
+  text: string,
+  filename: string,
+  analysis: StairAnalysisResult,
+  largeFileMode = false,
+  omissionsConfirmed = false
+): StairRepairResult {
+  const preconditionError = stairRepairPreconditionError(analysis, omissionsConfirmed);
+  if (preconditionError) throw new Error(preconditionError);
   const model = parseStep(text);
   const changes: StairRepairResult["report"]["changes"] = [];
+  const propertyChanges: StairRepairResult["report"]["propertyChanges"] = [];
   const originalArgs = new Map<number, string[]>();
   const psetIndex = buildPropertyIndex(model);
   let nextId = nextStepId(model.records);
@@ -129,7 +226,7 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
   const deleted = new Set<number>();
 
   for (const flight of analysis.flights) {
-    if (flight.status === "Conflict") continue;
+    if (flight.status === "Conflict" || flight.status === "Blocked") continue;
     const record = model.records.get(flight.expressId);
     if (!record || (record.entity !== "IFCSTAIRFLIGHT" && record.entity !== "IFCBUILDINGELEMENTPROXY")) continue;
     originalArgs.set(record.id, [...record.args]);
@@ -149,6 +246,29 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
       const pset = getOrCreateFlightPropertySet(model, psetIndex, record.id, record.args[1] ?? "$", () => nextId++);
       if (writeMissingFlightProperty(model, pset, field, result.value, () => nextId++)) propertyValuesWritten += 1;
     }
+    for (const property of flight.inheritedProperties) {
+      if (property.action !== "Inherit" || property.parentPropertyId === undefined || flight.parentStairId === undefined) continue;
+      const source = model.records.get(property.parentPropertyId);
+      if (!source) continue;
+      const pset = getOrCreateFlightPropertySet(model, psetIndex, record.id, record.args[1] ?? "$", () => nextId++, property.propertySet);
+      const copyId = nextId++;
+      // A copy, never a shared reference: the parent's property instance must stay untouched.
+      model.records.set(copyId, { id: copyId, entity: source.entity, args: [...source.args], raw: "" });
+      const propertyIds = parseRefList(pset.args[4] ?? "()");
+      const placeholderIndex = property.existingPropertyId === undefined ? -1 : propertyIds.indexOf(property.existingPropertyId);
+      if (placeholderIndex >= 0) propertyIds[placeholderIndex] = copyId;
+      else propertyIds.push(copyId);
+      pset.args[4] = formatRefList(propertyIds);
+      propertyChanges.push({
+        expressId: record.id,
+        name: flight.name,
+        propertySet: property.propertySet,
+        property: property.name,
+        oldValue: property.existingValue ?? "Missing",
+        newValue: property.parentValue ?? "",
+        parentStairId: flight.parentStairId
+      });
+    }
   }
 
   const ifcText = serializeStep(model, deleted);
@@ -156,6 +276,13 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
   const validation = largeFileMode
     ? validateStairRepairInMemory(model, changes, originalArgs, convertedIds)
     : validateStairRepair(text, ifcText, changes, originalArgs, convertedIds);
+  const inheritedErrors = validateInheritedProperties(largeFileMode ? model : parseStep(ifcText), propertyChanges);
+  if (inheritedErrors.length) {
+    validation.blockingErrors.push(...inheritedErrors);
+    validation.passed = false;
+  } else if (propertyChanges.length) {
+    validation.checks.push(`${propertyChanges.length} parent stair properties were re-read from the repaired stair flights.`);
+  }
   return {
     ifcText,
     outputFilename: filename.replace(/\.ifc$/i, "") + "_repaired.ifc",
@@ -169,6 +296,10 @@ export function repairStairFlights(text: string, filename: string, analysis: Sta
       entitiesConverted: conversions.length,
       conversions,
       changes,
+      inheritedPropertiesWritten: propertyChanges.length,
+      propertyChanges,
+      blockers: analysis.blockers,
+      confirmedOmissions: analysis.missingParentProperties,
       validation
     }
   };
@@ -179,17 +310,18 @@ function getOrCreateFlightPropertySet(
   psetIndex: Map<number, number[]>,
   flightId: number,
   ownerHistory: string,
-  allocateId: () => number
+  allocateId: () => number,
+  propertySetName = "Pset_StairFlightCommon"
 ) {
   for (const psetId of psetIndex.get(flightId) ?? []) {
     const pset = model.records.get(psetId);
-    if (pset?.entity === "IFCPROPERTYSET" && unquoteStep(pset.args[2] ?? "") === "Pset_StairFlightCommon") return pset;
+    if (pset?.entity === "IFCPROPERTYSET" && unquoteStep(pset.args[2] ?? "") === propertySetName) return pset;
   }
   const psetId = allocateId();
   const pset = {
     id: psetId,
     entity: "IFCPROPERTYSET",
-    args: [quoteStep(makeIfcGuid()), ownerHistory, quoteStep("Pset_StairFlightCommon"), "$", "()"],
+    args: [quoteStep(makeIfcGuid()), ownerHistory, quoteStep(propertySetName), "$", "()"],
     raw: ""
   };
   model.records.set(psetId, pset);
@@ -287,8 +419,16 @@ function analyseFlight(
       evidence.push(`${FIELD_LABELS[field]} already exists in Pset_StairFlightCommon with value ${flightPsetValue}.`);
       continue;
     }
+    const isDimension = field === "riserHeight" || field === "treadLength";
+    if (isDimension && parentValue === undefined) {
+      // Riser height and tread length follow the parent IfcStair. Without a parent value the
+      // field stays empty and is reported as a parent omission instead of guessed from geometry.
+      fields[field] = { calculated: geometricCandidate, source: "UNRESOLVED", confidence: "None" };
+      evidence.push(`${FIELD_LABELS[field]} is not set on the parent stair and is left out.`);
+      continue;
+    }
     if (geometricCandidate !== undefined) {
-      const comparison = (field === "riserHeight" || field === "treadLength") ? parentValue : undefined;
+      const comparison = isDimension ? parentValue : undefined;
       const confirmedByParent = comparison !== undefined && valuesMatch(field, geometricCandidate, comparison, tolerance);
       const source = correctsExtraBoundary
         ? "PARENT_CONFIRMED"
@@ -299,7 +439,10 @@ function analyseFlight(
         : field === "numberOfTreads"
           ? "DERIVED"
           : "GEOMETRY";
-      fields[field] = fieldResult(undefined, geometricCandidate, source, "High", comparison, tolerance, field);
+      // A confirmed dimension takes the parent's exact value rather than the mesh approximation.
+      const value = isDimension && confirmedByParent && comparison !== undefined ? comparison : geometricCandidate;
+      fields[field] = fieldResult(undefined, value, source, "High", comparison, tolerance, field);
+      if (isDimension && confirmedByParent) fields[field].calculated = geometricCandidate;
       continue;
     }
     if ((field === "riserHeight" || field === "treadLength") && parentValue !== undefined) {
@@ -337,7 +480,8 @@ function analyseFlight(
     fields,
     status,
     evidence,
-    repairableFields
+    repairableFields,
+    inheritedProperties: []
   };
 }
 
@@ -351,20 +495,27 @@ function calculateTessellatedCounts(
 ): Partial<Record<StairFieldName, number>> {
   const upwardLevels = extractHorizontalLevels(flight, model, tolerance, true);
   if (upwardLevels.length === 0) return {};
-  const mergeDistance = parentRiserHeight === undefined
+  // Archicad meshes carry a joint face a few mm below the top tread where the flight meets a
+  // landing or floor slab. Without a parent riser height that face would count as an extra
+  // step, so estimate the riser spacing from the mesh itself and merge levels closer than it.
+  const riserSpacing = parentRiserHeight ?? estimateRiserSpacing(upwardLevels, tolerance);
+  if (parentRiserHeight === undefined && riserSpacing !== undefined) {
+    evidence.push(`Estimated riser spacing ${formatEvidenceNumber(riserSpacing)} from tread levels to merge joint faces.`);
+  }
+  const mergeDistance = riserSpacing === undefined
     ? tolerance.elevation
-    : Math.max(tolerance.elevation, parentRiserHeight * 0.25);
+    : Math.max(tolerance.elevation, riserSpacing * 0.25);
   let levels = clusterNumericLevels(upwardLevels, mergeDistance);
-  if (parentRiserHeight !== undefined && levels.length >= 3) {
+  if (riserSpacing !== undefined && levels.length >= 3) {
     const filtered: number[] = [levels[0]];
     for (let index = 1; index < levels.length - 1; index += 1) {
       const previous = filtered.at(-1)!;
       const current = levels[index];
       const next = levels[index + 1];
-      const shortGap = current - previous < parentRiserHeight * 0.5;
-      const bridged = Math.abs((next - previous) - parentRiserHeight) <= Math.max(tolerance.dimension, parentRiserHeight * 0.1);
+      const shortGap = current - previous < riserSpacing * 0.5;
+      const bridged = Math.abs((next - previous) - riserSpacing) <= Math.max(tolerance.dimension, riserSpacing * 0.1);
       if (shortGap && bridged) {
-        evidence.push(`Ignored internal horizontal face at ${formatEvidenceNumber(current)} because adjacent levels confirm the parent riser spacing.`);
+        evidence.push(`Ignored internal horizontal face at ${formatEvidenceNumber(current)} because adjacent levels confirm the riser spacing.`);
         continue;
       }
       filtered.push(current);
@@ -388,6 +539,14 @@ function calculateTessellatedCounts(
   const numberOfRisers = numberOfTreads + 1;
   evidence.push(`Tessellated stair faces contain ${numberOfTreads} upward tread level${numberOfTreads === 1 ? "" : "s"}; inferred ${numberOfRisers} risers.`);
   return { numberOfRisers, numberOfTreads };
+}
+
+function estimateRiserSpacing(upwardLevels: number[], tolerance: StairTolerance): number | undefined {
+  const gaps = consecutiveDiffs(clusterNumericLevels(upwardLevels, tolerance.elevation)).filter((gap) => gap > tolerance.elevation);
+  if (gaps.length < 2) return undefined;
+  const median = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+  const metres = median * tolerance.unitScaleToMetres;
+  return metres >= 0.05 && metres <= 0.4 ? median : undefined;
 }
 
 function extractHorizontalLevels(
@@ -590,18 +749,111 @@ function fieldResult(
   return result;
 }
 
-function buildParentLinks(model: ReturnType<typeof parseStep>) {
+function buildParentLinks(model: ReturnType<typeof parseStep>, parentEntity = "IFCSTAIR") {
   const childToParent = new Map<number, number>();
   const parentToChildren = new Map<number, number[]>();
   for (const record of model.records.values()) {
     if (record.entity !== "IFCRELAGGREGATES") continue;
     const parent = parseRef(record.args[4] ?? "");
-    if (parent === undefined || model.records.get(parent)?.entity !== "IFCSTAIR") continue;
+    if (parent === undefined || model.records.get(parent)?.entity !== parentEntity) continue;
     const children = parseRefList(record.args[5] ?? "");
     parentToChildren.set(parent, [...(parentToChildren.get(parent) ?? []), ...children]);
     for (const child of children) childToParent.set(child, parent);
   }
   return { childToParent, parentToChildren };
+}
+
+/** IfcStairFlight objects that aggregate other elements are whole stairs exported with the wrong class. */
+function buildStairFlightParentLinks(model: StepModel) {
+  return buildParentLinks(model, "IFCSTAIRFLIGHT");
+}
+
+function findNamedProperty(psetIds: number[], model: StepModel, propertyName: string) {
+  for (const psetId of psetIds) {
+    const pset = model.records.get(psetId);
+    if (pset?.entity !== "IFCPROPERTYSET") continue;
+    for (const propertyId of parseRefList(pset.args[4] ?? "")) {
+      const property = model.records.get(propertyId);
+      if (property?.entity !== "IFCPROPERTYSINGLEVALUE" && property?.entity !== "IFCPROPERTYENUMERATEDVALUE") continue;
+      if (unquoteStep(property.args[0] ?? "") !== propertyName) continue;
+      return { property, propertySet: unquoteStep(pset.args[2] ?? ""), value: propertyTextValue(property) };
+    }
+  }
+  return undefined;
+}
+
+function propertyTextValue(property: StepRecord): string | undefined {
+  let raw = (property.args[2] ?? "$").trim();
+  // IfcPropertyEnumeratedValue holds a list of values; the first one is the selected value.
+  if (property.entity === "IFCPROPERTYENUMERATEDVALUE") {
+    if (!raw.startsWith("(")) return undefined;
+    raw = splitStepArgs(raw.slice(1, -1))[0]?.trim() ?? "$";
+  }
+  const typed = parseTypedValue(raw);
+  if (typed.empty) return undefined;
+  const value = typed.value.trim();
+  return PLACEHOLDER_TEXT_VALUES.has(value) ? undefined : value;
+}
+
+function analyseInheritedProperties(flightId: number, parentId: number, psets: Map<number, number[]>, model: StepModel): StairInheritedProperty[] {
+  const parentPsets = psets.get(parentId) ?? [];
+  const flightPsets = psets.get(flightId) ?? [];
+  return INHERITED_PROPERTIES.map(({ name, defaultPropertySet }) => {
+    const parent = findNamedProperty(parentPsets, model, name);
+    const existing = findNamedProperty(flightPsets, model, name);
+    const result: StairInheritedProperty = {
+      name,
+      propertySet: existing?.propertySet ?? defaultPropertySet,
+      parentValue: parent?.value,
+      parentPropertyId: parent?.value === undefined ? undefined : parent.property.id,
+      existingValue: existing?.value,
+      existingPropertyId: existing?.property.id,
+      action: "Inherit"
+    };
+    if (parent?.value === undefined) result.action = "Parent Missing";
+    else if (existing?.value === undefined) result.action = "Inherit";
+    else if (existing.value.toUpperCase() === parent.value.toUpperCase()) result.action = "Already Matches";
+    else result.action = "Kept (differs from parent)";
+    return result;
+  });
+}
+
+function findMissingParentProperties(
+  links: ReturnType<typeof buildParentLinks>,
+  flights: StairFlightAnalysis[],
+  psets: Map<number, number[]>,
+  model: StepModel,
+  storeys: Map<number, string>
+): StairMissingParentProperties[] {
+  const repairableParents = new Set(flights.filter((flight) => flight.status !== "Blocked").map((flight) => flight.parentStairId));
+  const results: StairMissingParentProperties[] = [];
+  for (const parentId of links.parentToChildren.keys()) {
+    if (!repairableParents.has(parentId)) continue;
+    const parent = model.records.get(parentId)!;
+    const dimensions = readStairProperties(psets.get(parentId) ?? [], model);
+    const missing: StairParentPropertyName[] = [];
+    if (dimensions.riserHeight === undefined) missing.push("RiserHeight");
+    if (dimensions.treadLength === undefined) missing.push("TreadLength");
+    for (const { name } of INHERITED_PROPERTIES) {
+      if (findNamedProperty(psets.get(parentId) ?? [], model, name)?.value === undefined) missing.push(name);
+    }
+    if (missing.length) {
+      results.push({ expressId: parentId, globalId: unquoteStep(parent.args[0] ?? ""), name: unquoteStep(parent.args[2] ?? "") || `#${parentId}`, storeyName: storeys.get(parentId), missing });
+    }
+  }
+  return results;
+}
+
+function validateInheritedProperties(model: StepModel, changes: StairRepairResult["report"]["propertyChanges"]): string[] {
+  const psets = buildPropertyIndex(model);
+  const errors: string[] = [];
+  for (const change of changes) {
+    const found = findNamedProperty(psets.get(change.expressId) ?? [], model, change.property);
+    if (found?.value !== change.newValue || found.propertySet !== change.propertySet) {
+      errors.push(`#${change.expressId} ${change.property} was not copied from parent stair #${change.parentStairId} correctly.`);
+    }
+  }
+  return errors;
 }
 
 function buildStoreyIndex(model: ReturnType<typeof parseStep>) {

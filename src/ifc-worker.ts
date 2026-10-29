@@ -199,7 +199,7 @@ self.onmessage = async (event: MessageEvent) => {
     if (type === "repair-stairs") {
       const text = payload.text ?? lastInspectedText;
       if (text === undefined) throw new Error("No IFC file has been inspected yet.");
-      const repaired = repairStairFlights(text, payload.filename, payload.analysis, lastInspectedFileSize >= LARGE_FILE_THRESHOLD_BYTES);
+      const repaired = repairStairFlights(text, payload.filename, payload.analysis, lastInspectedFileSize >= LARGE_FILE_THRESHOLD_BYTES, payload.omissionsConfirmed === true);
       if (lastInspectedFileSize < LARGE_FILE_THRESHOLD_BYTES) {
         await reopenWithWebIfc(repaired.ifcText);
         repaired.report.validation.checks.push("Output reopened successfully with web-ifc/WebAssembly.");

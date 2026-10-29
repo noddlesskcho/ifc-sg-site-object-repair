@@ -62,6 +62,7 @@ const stairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/stair
 const largeStairPath = "C:/Users/ISS/Documents/Corenet X/Example IFC files from Consultants/Sample model from ADDP/BLOCK 41.ifc";
 const podiumStairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2531_AR_PODIUM.ifc";
 const blk01StairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2531_AR_BLK01.ifc";
+const linkPodiumStairPath = "C:/Users/ISS/Documents/Corenet X/Missing IfcStairFlight/from P&T/S2527_AR_ LINK PODIUM.ifc";
 const previouslyRepairedStairPaths = [
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired.ifc",
   "C:/Users/ISS/Downloads/stairs_for checking_StairFlight_Repaired (1).ifc",
@@ -81,7 +82,7 @@ describe.skipIf(!existsSync(stairPath))("supplied stair IFC file", () => {
       [234, 2, 1]
     ]);
     expect(analysis.parents[0].status).toBe("Pass");
-    const repaired = repairStairFlights(source, "stairs_for checking.ifc", analysis);
+    const repaired = repairStairFlights(source, "stairs_for checking.ifc", analysis, false, true);
 
     expect(repaired.report.validation.passed).toBe(true);
     expect(repaired.report.fieldsWritten).toBe(16);
@@ -102,7 +103,7 @@ describe.skipIf(!existsSync(largeStairPath))("large supplied stair IFC file", ()
   it("analyses and repairs without exceeding the JavaScript argument limit", () => {
     const source = readFileSync(largeStairPath, "utf8");
     const analysis = analyseStairFlights(source, "BLOCK 41.ifc");
-    const repaired = repairStairFlights(source, "BLOCK 41.ifc", analysis);
+    const repaired = repairStairFlights(source, "BLOCK 41.ifc", analysis, false, true);
 
     expect(analysis.flights.length).toBeGreaterThan(0);
     expect(repaired.report.flightsAnalysed).toBe(analysis.flights.length);
@@ -154,7 +155,7 @@ describe.skipIf(!existsSync(podiumStairPath))("single-flight podium stairs", () 
     }
     expect(analysis.flights.filter((flight) => [486904, 486941, 487155].includes(flight.parentStairId ?? -1)).map((flight) => [flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value])).toEqual([[5, 6], [5, 6], [11, 12]]);
 
-    const repaired = repairStairFlights(source, "S2531_AR_PODIUM.ifc", analysis);
+    const repaired = repairStairFlights(source, "S2531_AR_PODIUM.ifc", analysis, false, true);
     expect(repaired.report.validation.passed).toBe(true);
     expect(repaired.report.entitiesConverted).toBeGreaterThanOrEqual(3);
     for (const proxyId of [373869, 375972, 398052]) expect(repaired.ifcText).toContain(`#${proxyId}= IFCSTAIRFLIGHT`);
@@ -177,6 +178,37 @@ describe.skipIf(!existsSync(blk01StairPath))("split-level landing stair", () => 
     expect(parent?.status).toBe("Pass");
     expect(parent?.message).toContain("19 in flights + 1 between landing levels");
     expect([ss071?.status, ss072?.status]).toEqual(["Ready to Repair", "Ready to Repair"]);
+  }, 60_000);
+});
+
+describe.skipIf(!existsSync(linkPodiumStairPath))("link podium stairs exported without IfcStair", () => {
+  it("blocks repair and reports each IfcStairFlight acting as a parent stair", () => {
+    const source = readFileSync(linkPodiumStairPath, "utf8");
+    const analysis = analyseStairFlights(source, "S2527_AR_ LINK PODIUM.ifc");
+
+    expect(analysis.repairBlocked).toBe(true);
+    expect(analysis.blockers.map((blocker) => blocker.code)).toEqual(["NO_IFCSTAIR", "STAIRFLIGHT_AS_PARENT"]);
+    expect(analysis.blockers[1].elements).toHaveLength(33);
+    expect(analysis.flights).toHaveLength(76);
+    expect(analysis.flights.every((flight) => flight.status === "Blocked")).toBe(true);
+    expect(() => repairStairFlights(source, "S2527_AR_ LINK PODIUM.ifc", analysis, false, true)).toThrow(/No IfcStair was found/);
+  }, 60_000);
+
+  it("counts 7 risers and 6 treads per flight around the ST5B landing once the parent is an IfcStair", () => {
+    // Re-class parent #321128 (PODIUMST5B) as IfcStair. Its values sit in Pset_StairFlightCommon,
+    // not Pset_StairCommon, so no parent riser height is read and the count
+    // must come from the mesh alone, which carries a joint face 25 mm under each top tread.
+    const source = readFileSync(linkPodiumStairPath, "utf8")
+      .replace(
+        "#321128=IFCSTAIRFLIGHT('2dQPhsQ7gjuN5kB6OYDBUq',#2,'PODIUMST5B',$,$,#345799,$,'A7699AF6-687A-ADE1-716E-2C662234B7B4',$,$,$,$,.NOTDEFINED.);",
+        "#321128=IFCSTAIR('2dQPhsQ7gjuN5kB6OYDBUq',#2,'PODIUMST5B',$,$,#345799,$,'A7699AF6-687A-ADE1-716E-2C662234B7B4',.NOTDEFINED.);"
+      );
+    const analysis = analyseStairFlights(source, "S2527_AR_ LINK PODIUM.ifc");
+    const counts = [257694, 257783].map((id) => {
+      const flight = analysis.flights.find((item) => item.expressId === id);
+      return [flight?.fields.numberOfRisers.value, flight?.fields.numberOfTreads.value];
+    });
+    expect(counts).toEqual([[7, 6], [7, 6]]);
   }, 60_000);
 });
 
