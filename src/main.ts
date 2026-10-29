@@ -299,7 +299,7 @@ function buildMissingParentPropertiesText(analysis: StairAnalysisResult) {
     `File: ${analysis.filename}`,
     `Analysed: ${analysis.analysedAt}`,
     "",
-    `${analysis.missingParentProperties.length} IfcStair have empty values.`,
+    `${analysis.missingParentProperties.length} IfcStair ${analysis.missingParentProperties.length === 1 ? "has" : "have"} empty values.`,
     "Their child IfcStairFlight will be left empty for the same values.",
     ""
   ];

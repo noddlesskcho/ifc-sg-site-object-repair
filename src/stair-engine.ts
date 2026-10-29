@@ -94,7 +94,14 @@ export function analyseStairFlights(
     if (record.entity === "IFCSTAIRFLIGHT") candidateIds.add(record.id);
     if (record.entity === "IFCSTAIR") stairCount += 1;
   }
-  const flightParents = buildStairFlightParentLinks(model);
+  // IfcStairFlight objects that aggregate other elements are whole stairs exported with the wrong class.
+  const flightParents = buildParentLinks(model, "IFCSTAIRFLIGHT");
+  const parentPropertyCache = new Map<number, InheritedValues>();
+  const parentInheritedValues = (parentId: number) => {
+    let values = parentPropertyCache.get(parentId);
+    if (!values) parentPropertyCache.set(parentId, values = readInheritedValues(psets.get(parentId) ?? [], model));
+    return values;
+  };
   for (const [parentId, children] of parentLinks.parentToChildren) {
     if (children.some((id) => model.records.get(id)?.entity === "IFCSTAIRFLIGHT")) continue;
     const proxies = children.filter((id) => model.records.get(id)?.entity === "IFCBUILDINGELEMENTPROXY");
@@ -114,7 +121,7 @@ export function analyseStairFlights(
     const flightPsetValues = record.entity === "IFCSTAIRFLIGHT" ? readStairFlightProperties(psets.get(record.id) ?? [], model) : {};
     const flight = analyseFlight(record, parent, siblingFlightCount, landingIds.length, parentValues, flightPsetValues, geometryById.get(record.id), tolerance, model);
     flight.storeyName = storeys.get(record.id) ?? (parentId ? storeys.get(parentId) : undefined);
-    if (parentId !== undefined) flight.inheritedProperties = analyseInheritedProperties(record.id, parentId, psets, model);
+    if (parentId !== undefined) flight.inheritedProperties = analyseInheritedProperties(psets.get(record.id) ?? [], parentInheritedValues(parentId), model);
     flights.push(flight);
   }
 
@@ -177,7 +184,7 @@ export function analyseStairFlights(
     flight.repairableFields = [];
     flight.evidence.push(`Parent stair #${parentConflict.expressId} count validation conflicts with its child totals; automatic repair is blocked.`);
   }
-  const missingParentProperties = findMissingParentProperties(parentLinks, flights, psets, model, storeys);
+  const missingParentProperties = findMissingParentProperties(parentLinks, flights, psets, model, storeys, parentInheritedValues);
   return {
     filename,
     schema,
@@ -220,6 +227,7 @@ export function repairStairFlights(
   const propertyChanges: StairRepairResult["report"]["propertyChanges"] = [];
   const originalArgs = new Map<number, string[]>();
   const psetIndex = buildPropertyIndex(model);
+  const psetRelations = buildPropertyRelationIndex(model);
   let nextId = nextStepId(model.records);
   let propertyValuesWritten = 0;
   const conversions: StairRepairResult["report"]["conversions"] = [];
@@ -243,19 +251,25 @@ export function repairStairFlights(
       if (!isMissing(record.args[argIndex]) || result.value === undefined || result.confidence === "None") continue;
       record.args[argIndex] = formatStepNumber(result.value, field === "numberOfRisers" || field === "numberOfTreads");
       changes.push({ expressId: record.id, name: flight.name, field, oldValue: "$", newValue: result.value, source: result.source });
-      const pset = getOrCreateFlightPropertySet(model, psetIndex, record.id, record.args[1] ?? "$", () => nextId++);
+      const pset = getOrCreateFlightPropertySet(model, psetIndex, psetRelations, record.id, record.args[1] ?? "$", () => nextId++);
       if (writeMissingFlightProperty(model, pset, field, result.value, () => nextId++)) propertyValuesWritten += 1;
     }
     for (const property of flight.inheritedProperties) {
       if (property.action !== "Inherit" || property.parentPropertyId === undefined || flight.parentStairId === undefined) continue;
       const source = model.records.get(property.parentPropertyId);
       if (!source) continue;
-      const pset = getOrCreateFlightPropertySet(model, psetIndex, record.id, record.args[1] ?? "$", () => nextId++, property.propertySet);
+      const pset = getOrCreateFlightPropertySet(model, psetIndex, psetRelations, record.id, record.args[1] ?? "$", () => nextId++, property.propertySet);
       const copyId = nextId++;
       // A copy, never a shared reference: the parent's property instance must stay untouched.
       model.records.set(copyId, { id: copyId, entity: source.entity, args: [...source.args], raw: "" });
       const propertyIds = parseRefList(pset.args[4] ?? "()");
-      const placeholderIndex = property.existingPropertyId === undefined ? -1 : propertyIds.indexOf(property.existingPropertyId);
+      // Match the placeholder by name: a detached set holds copies with new ids.
+      const placeholderIndex = propertyIds.findIndex((id) => {
+        const existing = model.records.get(id);
+        return (existing?.entity === "IFCPROPERTYSINGLEVALUE" || existing?.entity === "IFCPROPERTYENUMERATEDVALUE")
+          && unquoteStep(existing.args[0] ?? "") === property.name
+          && propertyTextValue(existing) === undefined;
+      });
       if (placeholderIndex >= 0) propertyIds[placeholderIndex] = copyId;
       else propertyIds.push(copyId);
       pset.args[4] = formatRefList(propertyIds);
@@ -273,10 +287,10 @@ export function repairStairFlights(
 
   const ifcText = serializeStep(model, deleted);
   const convertedIds = new Set(conversions.map((item) => item.expressId));
-  const validation = largeFileMode
-    ? validateStairRepairInMemory(model, changes, originalArgs, convertedIds)
+  const [validation, rereadModel]: [ValidationResult, StepModel | undefined] = largeFileMode
+    ? [validateStairRepairInMemory(model, changes, originalArgs, convertedIds), model]
     : validateStairRepair(text, ifcText, changes, originalArgs, convertedIds);
-  const inheritedErrors = validateInheritedProperties(largeFileMode ? model : parseStep(ifcText), propertyChanges);
+  const inheritedErrors = rereadModel ? validateInheritedProperties(rereadModel, propertyChanges) : [];
   if (inheritedErrors.length) {
     validation.blockingErrors.push(...inheritedErrors);
     validation.passed = false;
@@ -308,6 +322,7 @@ export function repairStairFlights(
 function getOrCreateFlightPropertySet(
   model: ReturnType<typeof parseStep>,
   psetIndex: Map<number, number[]>,
+  psetRelations: Map<number, number[]>,
   flightId: number,
   ownerHistory: string,
   allocateId: () => number,
@@ -315,7 +330,8 @@ function getOrCreateFlightPropertySet(
 ) {
   for (const psetId of psetIndex.get(flightId) ?? []) {
     const pset = model.records.get(psetId);
-    if (pset?.entity === "IFCPROPERTYSET" && unquoteStep(pset.args[2] ?? "") === propertySetName) return pset;
+    if (pset?.entity !== "IFCPROPERTYSET" || unquoteStep(pset.args[2] ?? "") !== propertySetName) continue;
+    return relatedObjectCount(model, psetRelations, psetId) > 1 ? detachSharedPropertySet(model, psetIndex, psetRelations, flightId, pset, allocateId) : pset;
   }
   const psetId = allocateId();
   const pset = {
@@ -333,6 +349,56 @@ function getOrCreateFlightPropertySet(
     raw: ""
   });
   psetIndex.set(flightId, [...(psetIndex.get(flightId) ?? []), psetId]);
+  psetRelations.set(psetId, [relationId]);
+  return pset;
+}
+
+function buildPropertyRelationIndex(model: StepModel): Map<number, number[]> {
+  const index = new Map<number, number[]>();
+  for (const record of model.records.values()) {
+    if (record.entity !== "IFCRELDEFINESBYPROPERTIES") continue;
+    const pset = parseRef(record.args[5] ?? "");
+    if (pset !== undefined) index.set(pset, [...(index.get(pset) ?? []), record.id]);
+  }
+  return index;
+}
+
+function relatedObjectCount(model: StepModel, psetRelations: Map<number, number[]>, psetId: number) {
+  return (psetRelations.get(psetId) ?? []).reduce((count, relationId) => count + parseRefList(model.records.get(relationId)?.args[4] ?? "()").length, 0);
+}
+
+/**
+ * A property set shared by several objects would pass one flight's values on to all of them, so the
+ * flight gets its own copy of the set and of its properties before anything is written.
+ */
+function detachSharedPropertySet(
+  model: StepModel,
+  psetIndex: Map<number, number[]>,
+  psetRelations: Map<number, number[]>,
+  flightId: number,
+  shared: StepRecord,
+  allocateId: () => number
+): StepRecord {
+  const propertyIds = parseRefList(shared.args[4] ?? "()").map((propertyId) => {
+    const property = model.records.get(propertyId);
+    if (!property) return propertyId;
+    const copyId = allocateId();
+    model.records.set(copyId, { id: copyId, entity: property.entity, args: [...property.args], raw: "" });
+    return copyId;
+  });
+  const psetId = allocateId();
+  const pset = { id: psetId, entity: shared.entity, args: [quoteStep(makeIfcGuid()), shared.args[1] ?? "$", shared.args[2] ?? "$", shared.args[3] ?? "$", formatRefList(propertyIds)], raw: "" };
+  model.records.set(psetId, pset);
+  for (const relationId of psetRelations.get(shared.id) ?? []) {
+    const relation = model.records.get(relationId);
+    const related = parseRefList(relation?.args[4] ?? "()");
+    if (!relation || !related.includes(flightId)) continue;
+    relation.args[4] = formatRefList(related.filter((id) => id !== flightId));
+  }
+  const relationId = allocateId();
+  model.records.set(relationId, { id: relationId, entity: "IFCRELDEFINESBYPROPERTIES", args: [quoteStep(makeIfcGuid()), shared.args[1] ?? "$", "$", "$", formatRefList([flightId]), `#${psetId}`], raw: "" });
+  psetRelations.set(psetId, [relationId]);
+  psetIndex.set(flightId, (psetIndex.get(flightId) ?? []).map((id) => (id === shared.id ? psetId : id)));
   return pset;
 }
 
@@ -506,16 +572,16 @@ function calculateTessellatedCounts(
     ? tolerance.elevation
     : Math.max(tolerance.elevation, riserSpacing * 0.25);
   let levels = clusterNumericLevels(upwardLevels, mergeDistance);
-  if (riserSpacing !== undefined && levels.length >= 3) {
+  if (parentRiserHeight !== undefined && levels.length >= 3) {
     const filtered: number[] = [levels[0]];
     for (let index = 1; index < levels.length - 1; index += 1) {
       const previous = filtered.at(-1)!;
       const current = levels[index];
       const next = levels[index + 1];
-      const shortGap = current - previous < riserSpacing * 0.5;
-      const bridged = Math.abs((next - previous) - riserSpacing) <= Math.max(tolerance.dimension, riserSpacing * 0.1);
+      const shortGap = current - previous < parentRiserHeight * 0.5;
+      const bridged = Math.abs((next - previous) - parentRiserHeight) <= Math.max(tolerance.dimension, parentRiserHeight * 0.1);
       if (shortGap && bridged) {
-        evidence.push(`Ignored internal horizontal face at ${formatEvidenceNumber(current)} because adjacent levels confirm the riser spacing.`);
+        evidence.push(`Ignored internal horizontal face at ${formatEvidenceNumber(current)} because adjacent levels confirm the parent riser spacing.`);
         continue;
       }
       filtered.push(current);
@@ -546,7 +612,10 @@ function estimateRiserSpacing(upwardLevels: number[], tolerance: StairTolerance)
   if (gaps.length < 2) return undefined;
   const median = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
   const metres = median * tolerance.unitScaleToMetres;
-  return metres >= 0.05 && metres <= 0.4 ? median : undefined;
+  if (metres < 0.05 || metres > 0.4) return undefined;
+  // Trust the estimate only when most gaps agree with it, so an irregular mesh keeps the plain merge.
+  const consistent = gaps.filter((gap) => Math.abs(gap - median) <= median * 0.1).length;
+  return consistent * 2 > gaps.length ? median : undefined;
 }
 
 function extractHorizontalLevels(
@@ -763,12 +832,11 @@ function buildParentLinks(model: ReturnType<typeof parseStep>, parentEntity = "I
   return { childToParent, parentToChildren };
 }
 
-/** IfcStairFlight objects that aggregate other elements are whole stairs exported with the wrong class. */
-function buildStairFlightParentLinks(model: StepModel) {
-  return buildParentLinks(model, "IFCSTAIRFLIGHT");
-}
+type NamedProperty = { property: StepRecord; propertySet: string; value: string | undefined };
+type InheritedValues = Record<StairInheritedPropertyName, NamedProperty | undefined>;
 
-function findNamedProperty(psetIds: number[], model: StepModel, propertyName: string) {
+function findNamedProperties(psetIds: number[], model: StepModel, propertyName: string): NamedProperty[] {
+  const found: NamedProperty[] = [];
   for (const psetId of psetIds) {
     const pset = model.records.get(psetId);
     if (pset?.entity !== "IFCPROPERTYSET") continue;
@@ -776,10 +844,20 @@ function findNamedProperty(psetIds: number[], model: StepModel, propertyName: st
       const property = model.records.get(propertyId);
       if (property?.entity !== "IFCPROPERTYSINGLEVALUE" && property?.entity !== "IFCPROPERTYENUMERATEDVALUE") continue;
       if (unquoteStep(property.args[0] ?? "") !== propertyName) continue;
-      return { property, propertySet: unquoteStep(pset.args[2] ?? ""), value: propertyTextValue(property) };
+      found.push({ property, propertySet: unquoteStep(pset.args[2] ?? ""), value: propertyTextValue(property) });
     }
   }
-  return undefined;
+  return found;
+}
+
+/** The first property with a real value wins; a placeholder is returned only when no set has a value. */
+function findNamedProperty(psetIds: number[], model: StepModel, propertyName: string): NamedProperty | undefined {
+  const found = findNamedProperties(psetIds, model, propertyName);
+  return found.find((item) => item.value !== undefined) ?? found[0];
+}
+
+function readInheritedValues(psetIds: number[], model: StepModel): InheritedValues {
+  return Object.fromEntries(INHERITED_PROPERTIES.map(({ name }) => [name, findNamedProperty(psetIds, model, name)])) as InheritedValues;
 }
 
 function propertyTextValue(property: StepRecord): string | undefined {
@@ -795,11 +873,9 @@ function propertyTextValue(property: StepRecord): string | undefined {
   return PLACEHOLDER_TEXT_VALUES.has(value) ? undefined : value;
 }
 
-function analyseInheritedProperties(flightId: number, parentId: number, psets: Map<number, number[]>, model: StepModel): StairInheritedProperty[] {
-  const parentPsets = psets.get(parentId) ?? [];
-  const flightPsets = psets.get(flightId) ?? [];
+function analyseInheritedProperties(flightPsets: number[], parentValues: InheritedValues, model: StepModel): StairInheritedProperty[] {
   return INHERITED_PROPERTIES.map(({ name, defaultPropertySet }) => {
-    const parent = findNamedProperty(parentPsets, model, name);
+    const parent = parentValues[name];
     const existing = findNamedProperty(flightPsets, model, name);
     const result: StairInheritedProperty = {
       name,
@@ -823,9 +899,11 @@ function findMissingParentProperties(
   flights: StairFlightAnalysis[],
   psets: Map<number, number[]>,
   model: StepModel,
-  storeys: Map<number, string>
+  storeys: Map<number, string>,
+  parentInheritedValues: (parentId: number) => InheritedValues
 ): StairMissingParentProperties[] {
-  const repairableParents = new Set(flights.filter((flight) => flight.status !== "Blocked").map((flight) => flight.parentStairId));
+  // Only parents with a flight that repair will touch need the user to confirm their omissions.
+  const repairableParents = new Set(flights.filter((flight) => flight.status !== "Blocked" && flight.status !== "Conflict").map((flight) => flight.parentStairId));
   const results: StairMissingParentProperties[] = [];
   for (const parentId of links.parentToChildren.keys()) {
     if (!repairableParents.has(parentId)) continue;
@@ -834,8 +912,9 @@ function findMissingParentProperties(
     const missing: StairParentPropertyName[] = [];
     if (dimensions.riserHeight === undefined) missing.push("RiserHeight");
     if (dimensions.treadLength === undefined) missing.push("TreadLength");
+    const inherited = parentInheritedValues(parentId);
     for (const { name } of INHERITED_PROPERTIES) {
-      if (findNamedProperty(psets.get(parentId) ?? [], model, name)?.value === undefined) missing.push(name);
+      if (inherited[name]?.value === undefined) missing.push(name);
     }
     if (missing.length) {
       results.push({ expressId: parentId, globalId: unquoteStep(parent.args[0] ?? ""), name: unquoteStep(parent.args[2] ?? "") || `#${parentId}`, storeyName: storeys.get(parentId), missing });
@@ -848,8 +927,8 @@ function validateInheritedProperties(model: StepModel, changes: StairRepairResul
   const psets = buildPropertyIndex(model);
   const errors: string[] = [];
   for (const change of changes) {
-    const found = findNamedProperty(psets.get(change.expressId) ?? [], model, change.property);
-    if (found?.value !== change.newValue || found.propertySet !== change.propertySet) {
+    const inSet = findNamedProperties(psets.get(change.expressId) ?? [], model, change.property).filter((item) => item.propertySet === change.propertySet);
+    if (inSet.length !== 1 || inSet[0].value !== change.newValue) {
       errors.push(`#${change.expressId} ${change.property} was not copied from parent stair #${change.parentStairId} correctly.`);
     }
   }
@@ -1050,7 +1129,7 @@ function validateStairRepair(
   changes: StairRepairResult["report"]["changes"],
   originals: Map<number, string[]>,
   convertedIds: Set<number>
-): ValidationResult {
+): [ValidationResult, StepModel | undefined] {
   const blockingErrors: string[] = [];
   const checks: string[] = [];
   const warnings: string[] = [];
@@ -1059,7 +1138,7 @@ function validateStairRepair(
     repaired = parseStep(repairedText);
     checks.push("Repaired IFC STEP data parsed successfully.");
   } catch (error) {
-    return { passed: false, blockingErrors: [error instanceof Error ? error.message : String(error)], warnings, checks };
+    return [{ passed: false, blockingErrors: [error instanceof Error ? error.message : String(error)], warnings, checks }, undefined];
   }
   const original = parseStep(originalText);
   const repairedPsets = buildPropertyIndex(repaired);
@@ -1084,7 +1163,7 @@ function validateStairRepair(
   }
   if (changes.length === 0) warnings.push("No missing fields had sufficient evidence to repair.");
   else checks.push(`${changes.length} repaired IfcStairFlight values were re-read from both native attributes and Pset_StairFlightCommon.`);
-  return { passed: blockingErrors.length === 0, blockingErrors, warnings, checks };
+  return [{ passed: blockingErrors.length === 0, blockingErrors, warnings, checks }, repaired];
 }
 
 function validateStairRepairInMemory(

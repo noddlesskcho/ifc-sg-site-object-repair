@@ -362,6 +362,31 @@ END-ISO-10303-21;`
     expect(repaired.report.propertyChanges.some((change) => change.property === "ConstructionMethod")).toBe(false);
   });
 
+  it("gives a flight its own property set before copying into a set shared with other objects", () => {
+    const shared = withParentProperties.replace("#78= IFCRELDEFINESBYPROPERTIES('SG_FLIGHT_REL',#2,$,$,(#31),#77);", "#78= IFCRELDEFINESBYPROPERTIES('SG_FLIGHT_REL',#2,$,$,(#31,#32),#77);");
+    const analysis = analyseStairFlights(shared, "Shared.ifc", [geometry]);
+    const repaired = repairStairFlights(shared, "Shared.ifc", analysis);
+    expect(repaired.report.validation.passed).toBe(true);
+    // The landing keeps the original set with its placeholder; only the flight moves to a copy.
+    expect(repaired.ifcText).toContain("#77= IFCPROPERTYSET('SG_FLIGHT',#2,'SGPset_StairFlight',$,(#76));");
+    expect(repaired.ifcText).toContain("#78= IFCRELDEFINESBYPROPERTIES('SG_FLIGHT_REL',#2,$,$,(#32),#77);");
+    expect(repaired.ifcText).toMatch(/IFCRELDEFINESBYPROPERTIES\('[^']+',#2,\$,\$,\(#31\),#\d+\);/);
+  });
+
+  it("keeps a real child value found in a second property set instead of filling the placeholder", () => {
+    const twoSets = withParentProperties.replace(
+      "ENDSEC;\nEND-ISO-10303-21;",
+      `#90= IFCPROPERTYSINGLEVALUE('ConstructionMethod',$,IFCLABEL('Precast'),$);
+#91= IFCPROPERTYSET('OTHER',#2,'Other_Pset',$,(#90));
+#92= IFCRELDEFINESBYPROPERTIES('OTHER_REL',#2,$,$,(#31),#91);
+ENDSEC;
+END-ISO-10303-21;`
+    );
+    const analysis = analyseStairFlights(twoSets, "TwoSets.ifc", [geometry]);
+    const constructionMethod = analysis.flights[0].inheritedProperties.find((property) => property.name === "ConstructionMethod");
+    expect(constructionMethod).toMatchObject({ action: "Kept (differs from parent)", existingValue: "Precast" });
+  });
+
   it("does not count a landing joint face as an extra step when the parent has no riser height", () => {
     const parentWithoutDimensions = `#50= IFCPROPERTYSINGLEVALUE('NumberOfRiser',$,IFCINTEGER(7),$);
 #54= IFCPROPERTYSET('PSET',#2,'Pset_StairCommon',$,(#50));
