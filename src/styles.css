@@ -1033,6 +1033,23 @@ td.mono {
   overflow: auto;
 }
 
+.confirm p {
+  margin: 0;
+}
+
+.missing-group {
+  margin-top: 12px;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
 .error-list {
   margin-top: 16px;
   border: 1px solid var(--danger-border);
