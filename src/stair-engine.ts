@@ -10,8 +10,6 @@ import type {
   StairGeometryEvidence,
   StairInheritedProperty,
   StairInheritedPropertyName,
-  StairMissingParentProperties,
-  StairParentPropertyName,
   StairParentValidation,
   StairRepairResult,
   StairValueSource,
@@ -184,7 +182,6 @@ export function analyseStairFlights(
     flight.repairableFields = [];
     flight.evidence.push(`Parent stair #${parentConflict.expressId} count validation conflicts with its child totals; automatic repair is blocked.`);
   }
-  const missingParentProperties = findMissingParentProperties(parentLinks, flights, psets, model, storeys, parentInheritedValues);
   return {
     filename,
     schema,
@@ -194,18 +191,14 @@ export function analyseStairFlights(
     parents,
     blockers,
     repairBlocked: stairCount === 0,
-    missingParentProperties,
     analysedAt: new Date().toISOString()
   };
 }
 
-/** Repair is refused until the user confirms that every missing parent stair value is meant to be left out. */
-export function stairRepairPreconditionError(analysis: StairAnalysisResult, omissionsConfirmed: boolean): string | undefined {
-  if (analysis.repairBlocked) return analysis.blockers.find((blocker) => blocker.code === "NO_IFCSTAIR")?.message ?? "No IfcStair was found; automatic repair is blocked.";
-  if (analysis.missingParentProperties.length && !omissionsConfirmed) {
-    return `Parent stair values are missing (${analysis.missingParentProperties.map((parent) => `${parent.name}: ${parent.missing.join(", ")}`).join("; ")}). Confirm they are intentionally left out before repair.`;
-  }
-  return undefined;
+/** Repair is refused when the file has no IfcStair for the flights to follow. */
+export function stairRepairPreconditionError(analysis: StairAnalysisResult): string | undefined {
+  if (!analysis.repairBlocked) return undefined;
+  return analysis.blockers.find((blocker) => blocker.code === "NO_IFCSTAIR")?.message ?? "No IfcStair was found; automatic repair is blocked.";
 }
 
 export function flightHasRepairWork(flight: StairFlightAnalysis): boolean {
@@ -217,10 +210,9 @@ export function repairStairFlights(
   text: string,
   filename: string,
   analysis: StairAnalysisResult,
-  largeFileMode = false,
-  omissionsConfirmed = false
+  largeFileMode = false
 ): StairRepairResult {
-  const preconditionError = stairRepairPreconditionError(analysis, omissionsConfirmed);
+  const preconditionError = stairRepairPreconditionError(analysis);
   if (preconditionError) throw new Error(preconditionError);
   const model = parseStep(text);
   const changes: StairRepairResult["report"]["changes"] = [];
@@ -313,7 +305,6 @@ export function repairStairFlights(
       inheritedPropertiesWritten: propertyChanges.length,
       propertyChanges,
       blockers: analysis.blockers,
-      confirmedOmissions: analysis.missingParentProperties,
       validation
     }
   };
@@ -488,7 +479,7 @@ function analyseFlight(
     const isDimension = field === "riserHeight" || field === "treadLength";
     if (isDimension && parentValue === undefined) {
       // Riser height and tread length follow the parent IfcStair. Without a parent value the
-      // field stays empty and is reported as a parent omission instead of guessed from geometry.
+      // field stays empty instead of being guessed from geometry.
       fields[field] = { calculated: geometricCandidate, source: "UNRESOLVED", confidence: "None" };
       evidence.push(`${FIELD_LABELS[field]} is not set on the parent stair and is left out.`);
       continue;
@@ -892,35 +883,6 @@ function analyseInheritedProperties(flightPsets: number[], parentValues: Inherit
     else result.action = "Kept (differs from parent)";
     return result;
   });
-}
-
-function findMissingParentProperties(
-  links: ReturnType<typeof buildParentLinks>,
-  flights: StairFlightAnalysis[],
-  psets: Map<number, number[]>,
-  model: StepModel,
-  storeys: Map<number, string>,
-  parentInheritedValues: (parentId: number) => InheritedValues
-): StairMissingParentProperties[] {
-  // Only parents with a flight that repair will touch need the user to confirm their omissions.
-  const repairableParents = new Set(flights.filter((flight) => flight.status !== "Blocked" && flight.status !== "Conflict").map((flight) => flight.parentStairId));
-  const results: StairMissingParentProperties[] = [];
-  for (const parentId of links.parentToChildren.keys()) {
-    if (!repairableParents.has(parentId)) continue;
-    const parent = model.records.get(parentId)!;
-    const dimensions = readStairProperties(psets.get(parentId) ?? [], model);
-    const missing: StairParentPropertyName[] = [];
-    if (dimensions.riserHeight === undefined) missing.push("RiserHeight");
-    if (dimensions.treadLength === undefined) missing.push("TreadLength");
-    const inherited = parentInheritedValues(parentId);
-    for (const { name } of INHERITED_PROPERTIES) {
-      if (inherited[name]?.value === undefined) missing.push(name);
-    }
-    if (missing.length) {
-      results.push({ expressId: parentId, globalId: unquoteStep(parent.args[0] ?? ""), name: unquoteStep(parent.args[2] ?? "") || `#${parentId}`, storeyName: storeys.get(parentId), missing });
-    }
-  }
-  return results;
 }
 
 function validateInheritedProperties(model: StepModel, changes: StairRepairResult["report"]["propertyChanges"]): string[] {

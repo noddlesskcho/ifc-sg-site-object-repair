@@ -28,7 +28,6 @@ interface AppState {
   repair?: RepairResult;
   stairAnalysis?: StairAnalysisResult;
   stairRepair?: StairRepairResult;
-  stairOmissionsConfirmed: boolean;
 }
 
 let state: AppState = {
@@ -45,8 +44,7 @@ let state: AppState = {
   matches: [],
   propertyChecks: [],
   warningsAccepted: false,
-  openPropertyGroups: {},
-  stairOmissionsConfirmed: false
+  openPropertyGroups: {}
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -210,9 +208,8 @@ function renderStairAnalysis(analysis: StairAnalysisResult) {
   const conflicts = analysis.flights.filter((flight) => flight.status === "Conflict");
   const incomplete = analysis.flights.filter((flight) => ["Partial", "Manual Review", "Cannot Calculate"].includes(flight.status));
   const blocked = analysis.flights.filter((flight) => flight.status === "Blocked");
-  const hasDiagnostics = conflicts.length > 0 || incomplete.length > 0 || analysis.blockers.length > 0 || analysis.missingParentProperties.length > 0 || analysis.parents.some((parent) => parent.status === "Conflict" || parent.status === "Incomplete");
-  const needsConfirmation = !analysis.repairBlocked && repairable.length > 0 && analysis.missingParentProperties.length > 0;
-  const canRepair = !analysis.repairBlocked && repairable.length > 0 && (!needsConfirmation || state.stairOmissionsConfirmed);
+  const hasDiagnostics = conflicts.length > 0 || incomplete.length > 0 || analysis.blockers.length > 0 || analysis.parents.some((parent) => parent.status === "Conflict" || parent.status === "Incomplete");
+  const canRepair = !analysis.repairBlocked && repairable.length > 0;
   const repairLabel = analysis.repairBlocked ? "Repair Blocked - No IfcStair" : repairable.length === 0 ? "Nothing to Repair" : "Repair Missing IfcStairFlight Information";
   return `<div class="stair-results">
     <div class="stair-scope-note">
@@ -220,7 +217,6 @@ function renderStairAnalysis(analysis: StairAnalysisResult) {
       <p><strong>Only information missing from both the stair flight and Pset_StairFlightCommon will be repaired.</strong> Risers and treads are calculated for each flight. RiserHeight, TreadLength, Status, ConstructionMethod, MaterialGrade and AmendmentStatus follow the parent IfcStair. Existing values are never overwritten. Orange values are proposed repairs; blue values already exist in the model.</p>
     </div>
     ${renderStairBlockers(analysis)}
-    ${needsConfirmation ? renderMissingParentProperties(analysis) : ""}
     <div class="summary-grid stair-summary">
       ${metric("Ready to repair", String(repairable.length))}
       ${metric("Conflict", String(conflicts.length))}
@@ -265,50 +261,6 @@ function renderStairBlockers(analysis: StairAnalysisResult) {
     <p>${escapeHtml(blocker.message)}</p>
     ${blocker.elements.length ? `<details><summary>${blocker.elements.length} element${blocker.elements.length === 1 ? "" : "s"}</summary><ul>${blocker.elements.map((element) => `<li>#${element.expressId} ${escapeHtml(element.name)}${element.storeyName ? ` | ${escapeHtml(element.storeyName)}` : ""} | ${escapeHtml(element.globalId)}</li>`).join("")}</ul></details>` : ""}
   </div>`).join("");
-}
-
-function renderMissingParentProperties(analysis: StairAnalysisResult) {
-  const count = analysis.missingParentProperties.length;
-  return `<div class="confirm">
-    <p><strong>${count} IfcStair ${count === 1 ? "has" : "have"} empty values.</strong> Their child IfcStairFlight will be left empty for the same values.</p>
-    ${groupMissingParentProperties(analysis).map((group) => `<div class="missing-group">
-      <p><strong>Empty:</strong> ${group.missing.join(", ")}</p>
-      <ul>${group.parents.map((parent) => `<li>${escapeHtml(parent.name)} <span class="muted">#${parent.expressId}${parent.storeyName ? ` | Level ${escapeHtml(parent.storeyName)}` : ""}</span></li>`).join("")}</ul>
-    </div>`).join("")}
-    <div class="confirm-actions">
-      <label><input type="checkbox" id="confirmStairOmissions" ${state.stairOmissionsConfirmed ? "checked" : ""} /> These values are intentionally left empty.</label>
-      <button class="secondary" data-action="download-stair-missing">${DownloadIcon()} Download list (.txt)</button>
-    </div>
-  </div>`;
-}
-
-function groupMissingParentProperties(analysis: StairAnalysisResult) {
-  const groups = new Map<string, { missing: string[]; parents: StairAnalysisResult["missingParentProperties"] }>();
-  const parents = [...analysis.missingParentProperties].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }) || a.expressId - b.expressId);
-  for (const parent of parents) {
-    const key = parent.missing.join(", ");
-    if (!groups.has(key)) groups.set(key, { missing: parent.missing, parents: [] });
-    groups.get(key)!.parents.push(parent);
-  }
-  return [...groups.values()];
-}
-
-function buildMissingParentPropertiesText(analysis: StairAnalysisResult) {
-  const lines = [
-    "IFC+SG Stair Repair - Empty IfcStair Values",
-    `File: ${analysis.filename}`,
-    `Analysed: ${analysis.analysedAt}`,
-    "",
-    `${analysis.missingParentProperties.length} IfcStair ${analysis.missingParentProperties.length === 1 ? "has" : "have"} empty values.`,
-    "Their child IfcStairFlight will be left empty for the same values.",
-    ""
-  ];
-  for (const group of groupMissingParentProperties(analysis)) {
-    lines.push(`Empty: ${group.missing.join(", ")}`);
-    for (const parent of group.parents) lines.push(`  ${parent.name} | #${parent.expressId} | Level: ${parent.storeyName || "Unknown"} | GUID: ${parent.globalId || "Unknown"}`);
-    lines.push("");
-  }
-  return lines.join("\r\n");
 }
 
 function inheritedPropertySummary(property: StairAnalysisResult["flights"][number]["inheritedProperties"][number]) {
@@ -606,8 +558,7 @@ function bindEvents() {
       openPropertyGroups: {},
       repair: undefined,
       stairAnalysis: undefined,
-      stairRepair: undefined,
-      stairOmissionsConfirmed: false
+      stairRepair: undefined
     });
     try {
       const bytes = await readFileWithProgress(file);
@@ -664,9 +615,6 @@ function bindEvents() {
       await runMatch();
     })
   );
-  document.querySelector<HTMLInputElement>("#confirmStairOmissions")?.addEventListener("change", (event) => {
-    setState({ stairOmissionsConfirmed: (event.target as HTMLInputElement).checked });
-  });
   document.querySelector<HTMLInputElement>("#acceptWarnings")?.addEventListener("change", (event) => {
     const checked = (event.target as HTMLInputElement).checked;
     setState({ warningsAccepted: checked });
@@ -732,7 +680,6 @@ async function handleAction(action: string, category?: RepairCategory) {
   if (action === "repair-stairs") await runStairRepair();
   if (action === "download-stair-ifc" && state.stairRepair) downloadText(state.stairRepair.ifcBytes ?? state.stairRepair.ifcText, state.stairRepair.outputFilename, "application/x-step");
   if (action === "download-stair-json" && state.stairRepair) downloadText(JSON.stringify(state.stairRepair.report, null, 2), state.stairRepair.outputFilename.replace(/\.ifc$/i, ".json"), "application/json");
-  if (action === "download-stair-missing" && state.stairAnalysis) downloadText(buildMissingParentPropertiesText(state.stairAnalysis), state.stairAnalysis.filename.replace(/\.ifc$/i, "") + "_empty_stair_values.txt", "text/plain");
   if (action === "download-stair-log" && state.stairAnalysis) downloadText(buildStairDiagnosticLog(state.stairAnalysis), state.stairAnalysis.filename.replace(/\.ifc$/i, "") + "_stair_diagnostic.txt", "text/plain");
 }
 
@@ -752,7 +699,7 @@ async function runStairAnalysis() {
       : analysis.flights.length
         ? `Analysed ${analysis.flights.length} stair flights or convertible stair components; ${repairable} can be repaired automatically.${blockerNote}`
         : "No repairable stair-flight components were found.";
-    setState({ stairAnalysis: analysis, stairOmissionsConfirmed: false, status: analysis.flights.length && !analysis.blockers.length ? "waiting" : "warning", loadingProgress: 100, message });
+    setState({ stairAnalysis: analysis, status: analysis.flights.length && !analysis.blockers.length ? "waiting" : "warning", loadingProgress: 100, message });
   } catch (error) {
     stopRepairProgress();
     setState({ status: "error", loadingProgress: 0, message: error instanceof Error ? error.message : String(error) });
@@ -761,7 +708,7 @@ async function runStairAnalysis() {
 
 async function runStairRepair() {
   if (!state.inspection || !state.stairAnalysis) return;
-  const preconditionError = stairRepairPreconditionError(state.stairAnalysis, state.stairOmissionsConfirmed);
+  const preconditionError = stairRepairPreconditionError(state.stairAnalysis);
   if (preconditionError) {
     setState({ status: "warning", message: preconditionError });
     return;
@@ -770,8 +717,8 @@ async function runStairRepair() {
   startRepairProgress();
   try {
     const repaired = worker
-      ? await worker.repairStairs(state.sourceText, state.inspection.filename, state.stairAnalysis, state.stairOmissionsConfirmed)
-      : repairStairFlights(state.sourceText, state.inspection.filename, state.stairAnalysis, false, state.stairOmissionsConfirmed);
+      ? await worker.repairStairs(state.sourceText, state.inspection.filename, state.stairAnalysis)
+      : repairStairFlights(state.sourceText, state.inspection.filename, state.stairAnalysis);
     stopRepairProgress();
     if (repaired.report.validation.passed) downloadText(repaired.ifcBytes ?? repaired.ifcText, repaired.outputFilename, "application/x-step");
     setState({ stairRepair: repaired, loadingProgress: 100, status: repaired.report.validation.passed ? "validation-passed" : "validation-failed", message: repaired.report.validation.passed ? `Repair complete. ${repaired.report.fieldsWritten} values were written and the validated IFC was downloaded automatically.` : "Repair finished, but post-repair validation found blocking errors." });
@@ -792,9 +739,6 @@ function buildStairDiagnosticLog(analysis: StairAnalysisResult) {
     lines.push(`BLOCKER ${blocker.code}`, `Reason: ${blocker.message}`);
     for (const element of blocker.elements) lines.push(`  #${element.expressId} ${element.name} | GUID: ${element.globalId || "Unknown"} | Level: ${element.storeyName || "Unknown"}`);
     lines.push("");
-  }
-  for (const parent of analysis.missingParentProperties) {
-    lines.push(`MISSING PARENT VALUES #${parent.expressId}`, `Element: ${parent.name}`, `GUID: ${parent.globalId || "Unknown"}`, `Level: ${parent.storeyName || "Unknown"}`, `Missing: ${parent.missing.join(", ")}`, "");
   }
   for (const parent of analysis.parents.filter((item) => item.status === "Conflict" || item.status === "Incomplete")) {
     lines.push(`PARENT #${parent.expressId}`, `Element: ${parent.name}`, `GUID: ${parent.globalId || "Unknown"}`, `Level: ${parent.storeyName || "Unknown"}`, `Status: ${parent.status}`, `Reason: ${parent.message}`, "");
