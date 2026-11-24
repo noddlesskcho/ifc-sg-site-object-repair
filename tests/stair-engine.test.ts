@@ -242,9 +242,8 @@ const withParentProperties = stairIfc.replace("ENDSEC;\nEND-ISO-10303-21;", pare
 
 // One straight flight whose mesh carries a joint face 25 mm below the top tread, as Archicad
 // exports where a flight meets a landing slab.
-function tessellatedFlightIfc(parentProperties: string) {
-  const treadLevels = [175, 350, 525, 700, 875, 1050, 1025];
-  const points = treadLevels.flatMap((z, index) => [`(${index * 275},0.,${z}.)`, `(${index * 275 + 275},0.,${z}.)`, `(${index * 275 + 275},1000.,${z}.)`, `(${index * 275},1000.,${z}.)`]);
+function tessellatedFlightIfc(parentProperties: string, treadLevels = [175, 350, 525, 700, 875, 1050, 1025], depthAt = (_index: number) => 275) {
+  const points = treadLevels.flatMap((z, index) => [`(${index * 275},0.,${z}.)`, `(${index * 275 + depthAt(index)},0.,${z}.)`, `(${index * 275 + depthAt(index)},1000.,${z}.)`, `(${index * 275},1000.,${z}.)`]);
   const faces = treadLevels.map((_, index) => `#${200 + index}= IFCINDEXEDPOLYGONALFACE((${index * 4 + 1},${index * 4 + 2},${index * 4 + 3},${index * 4 + 4}));`);
   return `ISO-10303-21;
 HEADER;
@@ -389,5 +388,16 @@ END-ISO-10303-21;`
     const flight = analysis.flights[0];
     expect([flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value]).toEqual([7, 6]);
     expect(flight.evidence.some((item) => item.startsWith("Estimated riser spacing 175"))).toBe(true);
+  });
+
+  it("does not count the narrow strip an Archicad flight starts with as a tread", () => {
+    // A 25 mm strip at the floor level, then six 300 mm treads: 7 risers and 6 treads.
+    const parentWithHeight = `#50= IFCPROPERTYSINGLEVALUE('RiserHeight',$,IFCLENGTHMEASURE(175.),$);
+#54= IFCPROPERTYSET('PSET',#2,'Pset_StairCommon',$,(#50));
+#55= IFCRELDEFINESBYPROPERTIES('PSETREL',#2,$,$,(#30),#54);`;
+    const mesh = tessellatedFlightIfc(parentWithHeight, [0, 175, 350, 525, 700, 875, 1050], (index) => (index === 0 ? 25 : 300));
+    const flight = analyseStairFlights(mesh, "Mesh.ifc").flights[0];
+    expect([flight.fields.numberOfRisers.value, flight.fields.numberOfTreads.value]).toEqual([7, 6]);
+    expect(flight.evidence.some((item) => item.startsWith("Ignored narrow start face at 0"))).toBe(true);
   });
 });

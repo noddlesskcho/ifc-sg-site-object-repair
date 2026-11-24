@@ -550,7 +550,7 @@ function calculateTessellatedCounts(
   evidence: string[],
   proxyParentValues?: Partial<Record<StairFieldName, number>>
 ): Partial<Record<StairFieldName, number>> {
-  const upwardLevels = extractHorizontalLevels(flight, model, tolerance, true);
+  const upwardLevels = withoutNarrowStartFace(extractHorizontalFaces(flight, model, tolerance, true), tolerance, evidence);
   if (upwardLevels.length === 0) return {};
   // Archicad meshes carry a joint face a few mm below the top tread where the flight meets a
   // landing or floor slab. Without a parent riser height that face would count as an extra
@@ -609,16 +609,47 @@ function estimateRiserSpacing(upwardLevels: number[], tolerance: StairTolerance)
   return consistent * 2 > gaps.length ? median : undefined;
 }
 
+/**
+ * Archicad starts a flight mesh with a narrow strip (about one nosing deep) at the level it rises
+ * from. That strip is not a tread, so the lowest level is dropped when its faces are far smaller
+ * than a typical tread.
+ */
+function withoutNarrowStartFace(faces: Array<{ level: number; area: number }>, tolerance: StairTolerance, evidence: string[]): number[] {
+  const levels = faces.map((face) => face.level);
+  const groups: Array<{ level: number; area: number }> = [];
+  for (const face of [...faces].sort((a, b) => a.level - b.level)) {
+    const group = groups.at(-1);
+    if (group && Math.abs(face.level - group.level) <= tolerance.elevation) group.area += face.area;
+    else groups.push({ ...face });
+  }
+  if (groups.length < 3) return levels;
+  const otherAreas = groups.slice(1).map((group) => group.area).sort((a, b) => a - b);
+  const typicalArea = otherAreas[Math.floor(otherAreas.length / 2)];
+  const start = groups[0];
+  if (start.area >= typicalArea * 0.25) return levels;
+  evidence.push(`Ignored narrow start face at ${formatEvidenceNumber(start.level)}; it is ${Math.round((start.area / typicalArea) * 100)}% of a typical tread and is not a step.`);
+  return levels.filter((level) => Math.abs(level - start.level) > tolerance.elevation);
+}
+
 function extractHorizontalLevels(
   product: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never,
   model: ReturnType<typeof parseStep>,
   tolerance: StairTolerance,
   upwardOnly: boolean
 ): number[] {
+  return extractHorizontalFaces(product, model, tolerance, upwardOnly).map((face) => face.level);
+}
+
+function extractHorizontalFaces(
+  product: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never,
+  model: ReturnType<typeof parseStep>,
+  tolerance: StairTolerance,
+  upwardOnly: boolean
+): Array<{ level: number; area: number }> {
   const representationId = parseRef(product.args[6] ?? "");
   const representation = representationId === undefined ? undefined : model.records.get(representationId);
   if (representation?.entity !== "IFCPRODUCTDEFINITIONSHAPE") return [];
-  const upwardLevels: number[] = [];
+  const faces: Array<{ level: number; area: number }> = [];
   for (const shapeId of parseRefList(representation.args[2] ?? "")) {
     const shape = model.records.get(shapeId);
     if (shape?.entity !== "IFCSHAPEREPRESENTATION") continue;
@@ -645,12 +676,12 @@ function extractHorizontalLevels(
         const normalZ = polygonNormalZ(vertices);
         const minimumArea = tolerance.dimension * tolerance.dimension;
         if (upwardOnly ? normalZ <= minimumArea : Math.abs(normalZ) <= minimumArea) continue;
-        upwardLevels.push(average(vertices.map((point) => point.z)));
+        faces.push({ level: average(vertices.map((point) => point.z)), area: Math.abs(normalZ) });
       }
     }
   }
   const offset = productPlacementZ(product, model);
-  return upwardLevels.map((level) => level + offset);
+  return faces.map((face) => ({ level: face.level + offset, area: face.area }));
 }
 
 function productPlacementZ(product: ReturnType<typeof parseStep>["records"] extends Map<number, infer T> ? T : never, model: ReturnType<typeof parseStep>): number {
